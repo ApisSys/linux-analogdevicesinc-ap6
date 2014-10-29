@@ -1,0 +1,8 @@
+comment "ApisSys Products Support Driver"
+
+config AP6
+	tristate "ApisSys High Speed data processing products support"
+	depends on PCI
+	default n
+	help
+	  An ApisSys product. Say Y when you want to support this tool.

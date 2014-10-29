@@ -1,0 +1,19 @@
+#!/bin/bash
+
+
+
+export KERNEL_ADDRESS=0x8000
+
+UBOOT_LOC=../../u-boot-xlnx-ap6
+
+UBOOT=$UBOOT_LOC/u-boot.elf
+
+KERNEL_LOC=./
+
+ZIMAGE=$KERNEL_LOC/arch/arm/boot/zImage
+
+UIMAGE=$KERNEL_LOC/arch/arm/boot/uImage
+
+MKIMAGE=$UBOOT_LOC/tools/mkimage
+
+$MKIMAGE -A arm -C none -O linux -T kernel -d $ZIMAGE -a $KERNEL_ADDRESS -e $KERNEL_ADDRESS $UIMAGE

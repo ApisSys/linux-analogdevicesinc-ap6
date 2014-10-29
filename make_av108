@@ -1,0 +1,18 @@
+#!/bin/bash
+
+#TOOLCHAIN_LOC=$HOME/toolchains/codesourcery-xilinx-linux/bin
+
+
+
+# TOOLCHAIN_LOC=$HOME/workspaces/av108/git/v2014.2/sw/ramdisk/host/usr/bin
+TOOLCHAIN_LOC=$HOME/toolchains/arm-linux-gnueabihf/bin
+
+MKIMAGE_LOC=$HOME/workspaces/av108/SDK/av108-2-uboot/tools
+
+#export CROSS_COMPILE=arm-xilinx-linux-gnueabi-
+export CROSS_COMPILE=arm-linux-gnueabihf-
+
+export PATH=$PATH:$TOOLCHAIN_LOC:$MKIMAGE_LOC
+make -j 10 ARCH=arm
+
+KBUILD_DEBARCH=armhf make ARCH=arm deb-pkg
