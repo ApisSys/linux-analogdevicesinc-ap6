@@ -187,6 +187,8 @@
 #define VENDOR_CONEXANT		0x0572
 #define VENDOR_TWISTEDMELON	0x2596
 #define VENDOR_HAUPPAUGE	0x2040
+#define VENDOR_PCTV		0x2013
+#define VENDOR_ADAPTEC		0x03f3
 
 enum mceusb_model_type {
 	MCE_GEN2 = 0,		/* Most boards */
@@ -240,7 +242,6 @@ static const struct mceusb_model mceusb_model[] = {
 		 * remotes, but we should have something handy,
 		 * to allow testing it
 		 */
-		.rc_map = RC_MAP_HAUPPAUGE,
 		.name = "Conexant Hybrid TV (cx231xx) MCE IR",
 	},
 	[CX_HYBRID_TV] = {
@@ -248,7 +249,6 @@ static const struct mceusb_model mceusb_model[] = {
 		.name = "Conexant Hybrid TV (cx231xx) MCE IR",
 	},
 	[HAUPPAUGE_CX_HYBRID_TV] = {
-		.rc_map = RC_MAP_HAUPPAUGE,
 		.no_tx = 1, /* eeprom says it has no tx */
 		.name = "Conexant Hybrid TV (cx231xx) MCE IR no TX",
 	},
@@ -302,6 +302,9 @@ static struct usb_device_id mceusb_dev_table[] = {
 	{ USB_DEVICE(VENDOR_SMK, 0x0338) },
 	/* SMK/I-O Data GV-MC7/RCKIT Receiver */
 	{ USB_DEVICE(VENDOR_SMK, 0x0353),
+	  .driver_info = MCE_GEN2_NO_TX },
+	/* SMK RXX6000 Infrared Receiver */
+	{ USB_DEVICE(VENDOR_SMK, 0x0357),
 	  .driver_info = MCE_GEN2_NO_TX },
 	/* Tatung eHome Infrared Transceiver */
 	{ USB_DEVICE(VENDOR_TATUNG, 0x9150) },
@@ -396,6 +399,19 @@ static struct usb_device_id mceusb_dev_table[] = {
 	/* Hauppauge WINTV-HVR-HVR 930C-HD - based on cx231xx */
 	{ USB_DEVICE(VENDOR_HAUPPAUGE, 0xb130),
 	  .driver_info = HAUPPAUGE_CX_HYBRID_TV },
+	{ USB_DEVICE(VENDOR_HAUPPAUGE, 0xb131),
+	  .driver_info = HAUPPAUGE_CX_HYBRID_TV },
+	{ USB_DEVICE(VENDOR_HAUPPAUGE, 0xb138),
+	  .driver_info = HAUPPAUGE_CX_HYBRID_TV },
+	{ USB_DEVICE(VENDOR_HAUPPAUGE, 0xb139),
+	  .driver_info = HAUPPAUGE_CX_HYBRID_TV },
+	{ USB_DEVICE(VENDOR_PCTV, 0x0259),
+	  .driver_info = HAUPPAUGE_CX_HYBRID_TV },
+	{ USB_DEVICE(VENDOR_PCTV, 0x025e),
+	  .driver_info = HAUPPAUGE_CX_HYBRID_TV },
+	/* Adaptec / HP eHome Receiver */
+	{ USB_DEVICE(VENDOR_ADAPTEC, 0x0094) },
+
 	/* Terminating entry */
 	{ }
 };
@@ -577,9 +593,8 @@ static void mceusb_dev_printdata(struct mceusb_dev *ir, char *buf,
 			if (len == 2)
 				dev_dbg(dev, "Get hw/sw rev?");
 			else
-				dev_dbg(dev, "hw/sw rev 0x%02x 0x%02x 0x%02x 0x%02x",
-					 data1, data2,
-					 buf[start + 4], buf[start + 5]);
+				dev_dbg(dev, "hw/sw rev %*ph",
+					4, &buf[start + 2]);
 			break;
 		case MCE_CMD_RESUME:
 			dev_dbg(dev, "Device resume requested");
@@ -1194,6 +1209,7 @@ static void mceusb_flash_led(struct mceusb_dev *ir)
 
 static struct rc_dev *mceusb_init_rc_dev(struct mceusb_dev *ir)
 {
+	struct usb_device *udev = ir->usbdev;
 	struct device *dev = ir->dev;
 	struct rc_dev *rc;
 	int ret;
@@ -1219,7 +1235,7 @@ static struct rc_dev *mceusb_init_rc_dev(struct mceusb_dev *ir)
 	rc->dev.parent = dev;
 	rc->priv = ir;
 	rc->driver_type = RC_DRIVER_IR_RAW;
-	rc_set_allowed_protocols(rc, RC_BIT_ALL);
+	rc->allowed_protocols = RC_BIT_ALL;
 	rc->timeout = MS_TO_NS(100);
 	if (!ir->flags.no_tx) {
 		rc->s_tx_mask = mceusb_set_tx_mask;
@@ -1227,8 +1243,19 @@ static struct rc_dev *mceusb_init_rc_dev(struct mceusb_dev *ir)
 		rc->tx_ir = mceusb_tx_ir;
 	}
 	rc->driver_name = DRIVER_NAME;
-	rc->map_name = mceusb_model[ir->model].rc_map ?
-			mceusb_model[ir->model].rc_map : RC_MAP_RC6_MCE;
+
+	switch (le16_to_cpu(udev->descriptor.idVendor)) {
+	case VENDOR_HAUPPAUGE:
+		rc->map_name = RC_MAP_HAUPPAUGE;
+		break;
+	case VENDOR_PCTV:
+		rc->map_name = RC_MAP_PINNACLE_PCTV_HD;
+		break;
+	default:
+		rc->map_name = RC_MAP_RC6_MCE;
+	}
+	if (mceusb_model[ir->model].rc_map)
+		rc->map_name = mceusb_model[ir->model].rc_map;
 
 	ret = rc_register_device(rc);
 	if (ret < 0) {
@@ -1322,7 +1349,7 @@ static int mceusb_dev_probe(struct usb_interface *intf,
 	if (!ir->urb_in)
 		goto urb_in_alloc_fail;
 
-	ir->usbdev = dev;
+	ir->usbdev = usb_get_dev(dev);
 	ir->dev = &intf->dev;
 	ir->len_in = maxp;
 	ir->flags.microsoft_gen1 = is_microsoft_gen1;
@@ -1389,6 +1416,7 @@ static int mceusb_dev_probe(struct usb_interface *intf,
 
 	/* Error-handling path */
 rc_dev_fail:
+	usb_put_dev(ir->usbdev);
 	usb_free_urb(ir->urb_in);
 urb_in_alloc_fail:
 	usb_free_coherent(dev, maxp, ir->buf_in, ir->dma_in);
@@ -1416,6 +1444,7 @@ static void mceusb_dev_disconnect(struct usb_interface *intf)
 	usb_kill_urb(ir->urb_in);
 	usb_free_urb(ir->urb_in);
 	usb_free_coherent(dev, ir->len_in, ir->buf_in, ir->dma_in);
+	usb_put_dev(dev);
 
 	kfree(ir);
 }

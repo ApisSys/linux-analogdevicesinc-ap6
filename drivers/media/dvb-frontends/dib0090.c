@@ -1115,9 +1115,15 @@ void dib0090_pwm_gain_reset(struct dvb_frontend *fe)
 		dib0090_set_bbramp_pwm(state, bb_ramp);
 
 		/* activate the ramp generator using PWM control */
-		dprintk("ramp RF gain = %d BAND = %s version = %d", state->rf_ramp[0], (state->current_band == BAND_CBAND) ? "CBAND" : "NOT CBAND", state->identity.version & 0x1f);
+		if (state->rf_ramp)
+			dprintk("ramp RF gain = %d BAND = %s version = %d",
+				state->rf_ramp[0],
+				(state->current_band == BAND_CBAND) ? "CBAND" : "NOT CBAND",
+				state->identity.version & 0x1f);
 
-		if ((state->rf_ramp[0] == 0) || (state->current_band == BAND_CBAND && (state->identity.version & 0x1f) <= P1D_E_F)) {
+		if (rf_ramp && ((state->rf_ramp && state->rf_ramp[0] == 0) ||
+		    (state->current_band == BAND_CBAND &&
+		    (state->identity.version & 0x1f) <= P1D_E_F))) {
 			dprintk("DE-Engage mux for direct gain reg control");
 			en_pwm_rf_mux = 0;
 		} else
@@ -1696,12 +1702,10 @@ static int dib0090_dc_offset_calibration(struct dib0090_state *state, enum front
 
 		if (state->identity.p1g)
 			state->dc = dc_p1g_table;
-		*tune_state = CT_TUNER_STEP_0;
 
 		/* fall through */
-
 	case CT_TUNER_STEP_0:
-		dprintk("Sart/continue DC calibration for %s path", (state->dc->i == 1) ? "I" : "Q");
+		dprintk("Start/continue DC calibration for %s path", (state->dc->i == 1) ? "I" : "Q");
 		dib0090_write_reg(state, 0x01, state->dc->bb1);
 		dib0090_write_reg(state, 0x07, state->bb7 | (state->dc->i << 7));
 
@@ -2557,10 +2561,19 @@ static int dib0090_set_params(struct dvb_frontend *fe)
 
 	do {
 		ret = dib0090_tune(fe);
-		if (ret != FE_CALLBACK_TIME_NEVER)
-			msleep(ret / 10);
-		else
+		if (ret == FE_CALLBACK_TIME_NEVER)
 			break;
+
+		/*
+		 * Despite dib0090_tune returns time at a 0.1 ms range,
+		 * the actual sleep time depends on CONFIG_HZ. The worse case
+		 * is when CONFIG_HZ=100. In such case, the minimum granularity
+		 * is 10ms. On some real field tests, the tuner sometimes don't
+		 * lock when this timer is lower than 10ms. So, enforce a 10ms
+		 * granularity and use usleep_range() instead of msleep().
+		 */
+		ret = 10 * (ret + 99)/100;
+		usleep_range(ret * 1000, (ret + 1) * 1000);
 	} while (state->tune_state != CT_TUNER_STOP);
 
 	return 0;
@@ -2662,7 +2675,7 @@ free_mem:
 }
 EXPORT_SYMBOL(dib0090_fw_register);
 
-MODULE_AUTHOR("Patrick Boettcher <pboettcher@dibcom.fr>");
-MODULE_AUTHOR("Olivier Grenie <olivier.grenie@dibcom.fr>");
+MODULE_AUTHOR("Patrick Boettcher <patrick.boettcher@posteo.de>");
+MODULE_AUTHOR("Olivier Grenie <olivier.grenie@parrot.com>");
 MODULE_DESCRIPTION("Driver for the DiBcom 0090 base-band RF Tuner");
 MODULE_LICENSE("GPL");

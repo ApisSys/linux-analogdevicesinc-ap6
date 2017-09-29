@@ -13,6 +13,7 @@
 #include <libgen.h>
 #include "build-id.h"
 #include "event.h"
+#include "util.h"
 
 #ifdef HAVE_LIBELF_SUPPORT
 #include <libelf.h>
@@ -21,27 +22,6 @@
 #include <elf.h>
 
 #include "dso.h"
-
-#ifdef HAVE_CPLUS_DEMANGLE_SUPPORT
-extern char *cplus_demangle(const char *, int);
-
-static inline char *bfd_demangle(void __maybe_unused *v, const char *c, int i)
-{
-	return cplus_demangle(c, i);
-}
-#else
-#ifdef NO_DEMANGLE
-static inline char *bfd_demangle(void __maybe_unused *v,
-				 const char __maybe_unused *c,
-				 int __maybe_unused i)
-{
-	return NULL;
-}
-#else
-#define PACKAGE 'perf'
-#include <bfd.h>
-#endif
-#endif
 
 /*
  * libelf 0.8.x and earlier do not support ELF_C_READ_MMAP;
@@ -54,11 +34,12 @@ static inline char *bfd_demangle(void __maybe_unused *v,
 #endif
 
 #ifdef HAVE_LIBELF_SUPPORT
-extern Elf_Scn *elf_section_by_name(Elf *elf, GElf_Ehdr *ep,
-				GElf_Shdr *shp, const char *name, size_t *idx);
+Elf_Scn *elf_section_by_name(Elf *elf, GElf_Ehdr *ep,
+			     GElf_Shdr *shp, const char *name, size_t *idx);
 #endif
 
 #ifndef DMGL_PARAMS
+#define DMGL_NO_OPTS     0              /* For readability... */
 #define DMGL_PARAMS      (1 << 0)       /* Include function args */
 #define DMGL_ANSI        (1 << 1)       /* Include const, volatile, etc */
 #endif
@@ -74,6 +55,7 @@ struct symbol {
 	u16		namelen;
 	u8		binding;
 	bool		ignore;
+	u8		arch_sym;
 	char		name[0];
 };
 
@@ -93,18 +75,22 @@ void symbols__delete(struct rb_root *symbols);
 
 static inline size_t symbol__size(const struct symbol *sym)
 {
-	return sym->end - sym->start + 1;
+	return sym->end - sym->start;
 }
 
 struct strlist;
+struct intlist;
 
 struct symbol_conf {
 	unsigned short	priv_size;
 	unsigned short	nr_events;
 	bool		try_vmlinux_path,
+			force,
 			ignore_vmlinux,
+			ignore_vmlinux_buildid,
 			show_kernel_path,
 			use_modules,
+			allow_aliases,
 			sort_by_name,
 			show_nr_samples,
 			show_total_period,
@@ -118,7 +104,15 @@ struct symbol_conf {
 			annotate_src,
 			event_group,
 			demangle,
-			filter_relative;
+			demangle_kernel,
+			filter_relative,
+			show_hist_headers,
+			branch_callstack,
+			has_filter,
+			show_ref_callgraph,
+			hide_unresolved,
+			raw_trace,
+			report_hierarchy;
 	const char	*vmlinux_name,
 			*kallsyms_name,
 			*source_prefix,
@@ -129,6 +123,8 @@ struct symbol_conf {
 	const char	*guestmount;
 	const char	*dso_list_str,
 			*comm_list_str,
+			*pid_list_str,
+			*tid_list_str,
 			*sym_list_str,
 			*col_width_list_str;
        struct strlist	*dso_list,
@@ -138,10 +134,25 @@ struct symbol_conf {
 			*dso_to_list,
 			*sym_from_list,
 			*sym_to_list;
+	struct intlist	*pid_list,
+			*tid_list;
 	const char	*symfs;
 };
 
 extern struct symbol_conf symbol_conf;
+
+struct symbol_name_rb_node {
+	struct rb_node	rb_node;
+	struct symbol	sym;
+};
+
+static inline int __symbol__join_symfs(char *bf, size_t size, const char *path)
+{
+	return path__join(bf, size, symbol_conf.symfs, path);
+}
+
+#define symbol__join_symfs(bf, path) __symbol__join_symfs(bf, sizeof(bf), path)
+
 extern int vmlinux_path__nr_entries;
 extern char **vmlinux_path;
 
@@ -159,8 +170,6 @@ struct ref_reloc_sym {
 struct map_symbol {
 	struct map    *map;
 	struct symbol *sym;
-	bool	      unfolded;
-	bool	      has_children;
 };
 
 struct addr_map_symbol {
@@ -192,6 +201,7 @@ struct addr_location {
 	u8	      filtered;
 	u8	      cpumode;
 	s32	      cpu;
+	s32	      socket;
 };
 
 struct symsrc {
@@ -215,6 +225,7 @@ struct symsrc {
 	GElf_Shdr dynshdr;
 
 	bool adjust_symbols;
+	bool is_64_bit;
 #endif
 };
 
@@ -230,13 +241,24 @@ int dso__load_vmlinux(struct dso *dso, struct map *map,
 		      symbol_filter_t filter);
 int dso__load_vmlinux_path(struct dso *dso, struct map *map,
 			   symbol_filter_t filter);
+int __dso__load_kallsyms(struct dso *dso, const char *filename, struct map *map,
+			 bool no_kcore, symbol_filter_t filter);
 int dso__load_kallsyms(struct dso *dso, const char *filename, struct map *map,
 		       symbol_filter_t filter);
+
+void dso__insert_symbol(struct dso *dso, enum map_type type,
+			struct symbol *sym);
 
 struct symbol *dso__find_symbol(struct dso *dso, enum map_type type,
 				u64 addr);
 struct symbol *dso__find_symbol_by_name(struct dso *dso, enum map_type type,
 					const char *name);
+struct symbol *symbol__next_by_name(struct symbol *sym);
+
+struct symbol *dso__first_symbol(struct dso *dso, enum map_type type);
+struct symbol *dso__next_symbol(struct symbol *sym);
+
+enum dso_type dso__type_fd(int fd);
 
 int filename__read_build_id(const char *filename, void *bf, size_t size);
 int sysfs__read_build_id(const char *filename, void *bf, size_t size);
@@ -246,12 +268,19 @@ int modules__parse(const char *filename, void *arg,
 int filename__read_debuglink(const char *filename, char *debuglink,
 			     size_t size);
 
-int symbol__init(void);
+struct perf_env;
+int symbol__init(struct perf_env *env);
 void symbol__exit(void);
 void symbol__elf_init(void);
 struct symbol *symbol__new(u64 start, u64 len, u8 binding, const char *name);
+size_t __symbol__fprintf_symname_offs(const struct symbol *sym,
+				      const struct addr_location *al,
+				      bool unknown_as_addr, FILE *fp);
 size_t symbol__fprintf_symname_offs(const struct symbol *sym,
 				    const struct addr_location *al, FILE *fp);
+size_t __symbol__fprintf_symname(const struct symbol *sym,
+				 const struct addr_location *al,
+				 bool unknown_as_addr, FILE *fp);
 size_t symbol__fprintf_symname(const struct symbol *sym, FILE *fp);
 size_t symbol__fprintf(struct symbol *sym, FILE *fp);
 bool symbol_type__is_a(char symbol_type, enum map_type map_type);
@@ -293,5 +322,17 @@ int compare_proc_modules(const char *from, const char *to);
 
 int setup_list(struct strlist **list, const char *list_str,
 	       const char *list_name);
+int setup_intlist(struct intlist **list, const char *list_str,
+		  const char *list_name);
+
+#ifdef HAVE_LIBELF_SUPPORT
+bool elf__needs_adjust_symbols(GElf_Ehdr ehdr);
+void arch__sym_update(struct symbol *s, GElf_Sym *sym);
+#endif
+
+#define SYMBOL_A 0
+#define SYMBOL_B 1
+
+int arch__choose_best_symbol(struct symbol *syma, struct symbol *symb);
 
 #endif /* __PERF_SYMBOL */

@@ -49,21 +49,15 @@
   <refsect1>
     <title>Description</title>
 
-    <note>
-      <title>Experimental</title>
-      <para>This is an <link linkend="experimental">experimental</link>
-      interface and may change in the future.</para>
-    </note>
-
     <para>This ioctl allows applications to enumerate all frame sizes
     supported by a sub-device on the given pad for the given media bus format.
     Supported formats can be retrieved with the &VIDIOC-SUBDEV-ENUM-MBUS-CODE;
     ioctl.</para>
 
     <para>To enumerate frame sizes applications initialize the
-    <structfield>pad</structfield>, <structfield>code</structfield> and
-    <structfield>index</structfield> fields of the
-    &v4l2-subdev-mbus-code-enum; and call the
+    <structfield>pad</structfield>, <structfield>which</structfield> ,
+    <structfield>code</structfield> and <structfield>index</structfield>
+    fields of the &v4l2-subdev-mbus-code-enum; and call the
     <constant>VIDIOC_SUBDEV_ENUM_FRAME_SIZE</constant> ioctl with a pointer to
     the structure. Drivers fill the minimum and maximum frame sizes or return
     an &EINVAL; if one of the input parameters is invalid.</para>
@@ -127,7 +121,12 @@
 	  </row>
 	  <row>
 	    <entry>__u32</entry>
-	    <entry><structfield>reserved</structfield>[9]</entry>
+	    <entry><structfield>which</structfield></entry>
+	    <entry>Frame sizes to be enumerated, from &v4l2-subdev-format-whence;.</entry>
+	  </row>
+	  <row>
+	    <entry>__u32</entry>
+	    <entry><structfield>reserved</structfield>[8]</entry>
 	    <entry>Reserved for future extensions. Applications and drivers must
 	    set the array to zero.</entry>
 	  </row>

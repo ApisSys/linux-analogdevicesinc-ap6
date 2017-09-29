@@ -42,7 +42,10 @@ void mxc_restart(enum reboot_mode mode, const char *cmd)
 {
 	unsigned int wcr_enable;
 
-	if (wdog_clk)
+	if (!wdog_base)
+		goto reset_fallback;
+
+	if (!IS_ERR(wdog_clk))
 		clk_enable(wdog_clk);
 
 	if (cpu_is_mx1())
@@ -51,7 +54,7 @@ void mxc_restart(enum reboot_mode mode, const char *cmd)
 		wcr_enable = (1 << 2);
 
 	/* Assert SRS signal */
-	__raw_writew(wcr_enable, wdog_base);
+	imx_writew(wcr_enable, wdog_base);
 	/*
 	 * Due to imx6q errata ERR004346 (WDOG: WDOG SRS bit requires to be
 	 * written twice), we add another two writes to ensure there must be at
@@ -59,8 +62,8 @@ void mxc_restart(enum reboot_mode mode, const char *cmd)
 	 * the target check here, since the writes shouldn't be a huge burden
 	 * for other platforms.
 	 */
-	__raw_writew(wcr_enable, wdog_base);
-	__raw_writew(wcr_enable, wdog_base);
+	imx_writew(wcr_enable, wdog_base);
+	imx_writew(wcr_enable, wdog_base);
 
 	/* wait for reset to assert... */
 	mdelay(500);
@@ -70,6 +73,7 @@ void mxc_restart(enum reboot_mode mode, const char *cmd)
 	/* delay to allow the serial port to show the message */
 	mdelay(50);
 
+reset_fallback:
 	/* we'll take a jump through zero as a poor second */
 	soft_restart(0);
 }
@@ -79,31 +83,10 @@ void __init mxc_arch_reset_init(void __iomem *base)
 	wdog_base = base;
 
 	wdog_clk = clk_get_sys("imx2-wdt.0", NULL);
-	if (IS_ERR(wdog_clk)) {
+	if (IS_ERR(wdog_clk))
 		pr_warn("%s: failed to get wdog clock\n", __func__);
-		wdog_clk = NULL;
-		return;
-	}
-
-	clk_prepare(wdog_clk);
-}
-
-void __init mxc_arch_reset_init_dt(void)
-{
-	struct device_node *np;
-
-	np = of_find_compatible_node(NULL, NULL, "fsl,imx21-wdt");
-	wdog_base = of_iomap(np, 0);
-	WARN_ON(!wdog_base);
-
-	wdog_clk = of_clk_get(np, 0);
-	if (IS_ERR(wdog_clk)) {
-		pr_warn("%s: failed to get wdog clock\n", __func__);
-		wdog_clk = NULL;
-		return;
-	}
-
-	clk_prepare(wdog_clk);
+	else
+		clk_prepare(wdog_clk);
 }
 
 #ifdef CONFIG_CACHE_L2X0
@@ -123,6 +106,9 @@ void __init imx_init_l2cache(void)
 		goto out;
 	}
 
+	if (readl_relaxed(l2x0_base + L2X0_CTRL) & L2X0_CTRL_EN)
+		goto skip_if_enabled;
+
 	/* Configure the L2 PREFETCH and POWER registers */
 	val = readl_relaxed(l2x0_base + L310_PREFETCH_CTRL);
 	val |= 0x70800000;
@@ -139,6 +125,7 @@ void __init imx_init_l2cache(void)
 		val &= ~(1 << 30 | 1 << 23);
 	writel_relaxed(val, l2x0_base + L310_PREFETCH_CTRL);
 
+skip_if_enabled:
 	iounmap(l2x0_base);
 	of_node_put(np);
 

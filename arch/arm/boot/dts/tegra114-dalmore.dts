@@ -15,6 +15,11 @@
 	aliases {
 		rtc0 = "/i2c@7000d000/tps65913@58";
 		rtc1 = "/rtc@7000e000";
+		serial0 = &uartd;
+	};
+
+	chosen {
+		stdout-path = "serial0:115200n8";
 	};
 
 	memory {
@@ -1163,7 +1168,7 @@
 			label = "Power";
 			gpios = <&gpio TEGRA_GPIO(Q, 0) GPIO_ACTIVE_LOW>;
 			linux,code = <KEY_POWER>;
-			gpio-key,wakeup;
+			wakeup-source;
 		};
 
 		volume_down {

@@ -101,7 +101,7 @@ static void coupled_barrier(atomic_t *a, unsigned online)
 	if (!coupled_coherence)
 		return;
 
-	smp_mb__before_atomic_inc();
+	smp_mb__before_atomic();
 	atomic_inc(a);
 
 	while (atomic_read(a) < online)
@@ -149,8 +149,12 @@ int cps_pm_enter_state(enum cps_pm_state state)
 
 	/* Setup the VPE to run mips_cps_pm_restore when started again */
 	if (config_enabled(CONFIG_CPU_PM) && state == CPS_PM_POWER_GATED) {
+		/* Power gating relies upon CPS SMP */
+		if (!mips_cps_smp_in_use())
+			return -EINVAL;
+
 		core_cfg = &mips_cps_core_bootcfg[core];
-		vpe_cfg = &core_cfg->vpe_config[current_cpu_data.vpe_id];
+		vpe_cfg = &core_cfg->vpe_config[cpu_vpe_id(&current_cpu_data)];
 		vpe_cfg->pc = (unsigned long)mips_cps_pm_restore;
 		vpe_cfg->gp = (unsigned long)current_thread_info();
 		vpe_cfg->sp = 0;
@@ -158,7 +162,7 @@ int cps_pm_enter_state(enum cps_pm_state state)
 
 	/* Indicate that this CPU might not be coherent */
 	cpumask_clear_cpu(cpu, &cpu_coherent_mask);
-	smp_mb__after_clear_bit();
+	smp_mb__after_atomic();
 
 	/* Create a non-coherent mapping of the core ready_count */
 	core_ready_count = per_cpu(ready_count, core);
@@ -263,6 +267,7 @@ static int __init cps_gen_flush_fsb(u32 **pp, struct uasm_label **pl,
 
 	/* CPUs which do not require the workaround */
 	case CPU_P5600:
+	case CPU_I6400:
 		return 0;
 
 	default:
@@ -376,6 +381,10 @@ static void * __init cps_gen_entry_code(unsigned cpu, enum cps_pm_state state)
 	memset(relocs, 0, sizeof(relocs));
 
 	if (config_enabled(CONFIG_CPU_PM) && state == CPS_PM_POWER_GATED) {
+		/* Power gating relies upon CPS SMP */
+		if (!mips_cps_smp_in_use())
+			goto out_err;
+
 		/*
 		 * Save CPU state. Note the non-standard calling convention
 		 * with the return address placed in v0 to avoid clobbering
@@ -463,7 +472,7 @@ static void * __init cps_gen_entry_code(unsigned cpu, enum cps_pm_state state)
 	/*
 	 * Disable all but self interventions. The load from COHCTL is defined
 	 * by the interAptiv & proAptiv SUMs as ensuring that the operation
-	 * resulting from the preceeding store is complete.
+	 * resulting from the preceding store is complete.
 	 */
 	uasm_i_addiu(&p, t0, zero, 1 << cpu_data[cpu].core);
 	uasm_i_sw(&p, t0, 0, r_pcohctl);
@@ -663,6 +672,7 @@ static int __init cps_pm_init(void)
 	case CPU_PROAPTIV:
 	case CPU_M5150:
 	case CPU_P5600:
+	case CPU_I6400:
 		stype_intervention = 0x2;
 		stype_memory = 0x3;
 		stype_ordering = 0x10;

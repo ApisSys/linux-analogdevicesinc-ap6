@@ -65,6 +65,12 @@ static void afs_async_workfn(struct work_struct *work)
 	call->async_workfn(call);
 }
 
+static int afs_wait_atomic_t(atomic_t *p)
+{
+	schedule();
+	return 0;
+}
+
 /*
  * open an RxRPC socket and bind it to be a server for callback notifications
  * - the socket is left in blocking mode and non-blocking ops use MSG_DONTWAIT
@@ -85,7 +91,7 @@ int afs_open_socket(void)
 		return -ENOMEM;
 	}
 
-	ret = sock_create_kern(AF_RXRPC, SOCK_DGRAM, PF_INET, &socket);
+	ret = sock_create_kern(&init_net, AF_RXRPC, SOCK_DGRAM, PF_INET, &socket);
 	if (ret < 0) {
 		destroy_workqueue(afs_async_calls);
 		_leave(" = %d [socket]", ret);
@@ -126,13 +132,16 @@ void afs_close_socket(void)
 {
 	_enter("");
 
+	wait_on_atomic_t(&afs_outstanding_calls, afs_wait_atomic_t,
+			 TASK_UNINTERRUPTIBLE);
+	_debug("no outstanding calls");
+
 	sock_release(afs_socket);
 
 	_debug("dework");
 	destroy_workqueue(afs_async_calls);
 
 	ASSERTCMP(atomic_read(&afs_outstanding_skbs), ==, 0);
-	ASSERTCMP(atomic_read(&afs_outstanding_calls), ==, 0);
 	_leave("");
 }
 
@@ -178,8 +187,6 @@ static void afs_free_call(struct afs_call *call)
 {
 	_debug("DONE %p{%s} [%d]",
 	       call, call->type->name, atomic_read(&afs_outstanding_calls));
-	if (atomic_dec_return(&afs_outstanding_calls) == -1)
-		BUG();
 
 	ASSERTCMP(call->rxcall, ==, NULL);
 	ASSERT(!work_pending(&call->async_work));
@@ -188,6 +195,9 @@ static void afs_free_call(struct afs_call *call)
 
 	kfree(call->request);
 	kfree(call);
+
+	if (atomic_dec_and_test(&afs_outstanding_calls))
+		wake_up_atomic_t(&afs_outstanding_calls);
 }
 
 /*
@@ -306,8 +316,8 @@ static int afs_send_pages(struct afs_call *call, struct msghdr *msg,
 
 			_debug("- range %u-%u%s",
 			       offset, to, msg->msg_flags ? " [more]" : "");
-			msg->msg_iov = (struct iovec *) iov;
-			msg->msg_iovlen = 1;
+			iov_iter_kvec(&msg->msg_iter, WRITE | ITER_KVEC,
+				      iov, 1, to - offset);
 
 			/* have to change the state *before* sending the last
 			 * packet as RxRPC might give us the reply before it
@@ -384,8 +394,8 @@ int afs_make_call(struct in_addr *addr, struct afs_call *call, gfp_t gfp,
 
 	msg.msg_name		= NULL;
 	msg.msg_namelen		= 0;
-	msg.msg_iov		= (struct iovec *) iov;
-	msg.msg_iovlen		= 1;
+	iov_iter_kvec(&msg.msg_iter, WRITE | ITER_KVEC, iov, 1,
+		      call->request_size);
 	msg.msg_control		= NULL;
 	msg.msg_controllen	= 0;
 	msg.msg_flags		= (call->send_pages ? MSG_MORE : 0);
@@ -420,9 +430,11 @@ error_kill_call:
 }
 
 /*
- * handles intercepted messages that were arriving in the socket's Rx queue
- * - called with the socket receive queue lock held to ensure message ordering
- * - called with softirqs disabled
+ * Handles intercepted messages that were arriving in the socket's Rx queue.
+ *
+ * Called from the AF_RXRPC call processor in waitqueue process context.  For
+ * each call, it is guaranteed this will be called in order of packet to be
+ * delivered.
  */
 static void afs_rx_interceptor(struct sock *sk, unsigned long user_call_ID,
 			       struct sk_buff *skb)
@@ -512,6 +524,12 @@ static void afs_deliver_to_call(struct afs_call *call)
 			call->error = call->type->abort_to_error(abort_code);
 			call->state = AFS_CALL_ABORTED;
 			_debug("Rcv ABORT %u -> %d", abort_code, call->error);
+			break;
+		case RXRPC_SKB_MARK_LOCAL_ABORT:
+			abort_code = rxrpc_kernel_get_abort_code(skb);
+			call->error = call->type->abort_to_error(abort_code);
+			call->state = AFS_CALL_ABORTED;
+			_debug("Loc ABORT %u -> %d", abort_code, call->error);
 			break;
 		case RXRPC_SKB_MARK_NET_ERROR:
 			call->error = -rxrpc_kernel_get_error_number(skb);
@@ -770,16 +788,12 @@ static int afs_deliver_cm_op_id(struct afs_call *call, struct sk_buff *skb,
 void afs_send_empty_reply(struct afs_call *call)
 {
 	struct msghdr msg;
-	struct iovec iov[1];
 
 	_enter("");
 
-	iov[0].iov_base		= NULL;
-	iov[0].iov_len		= 0;
 	msg.msg_name		= NULL;
 	msg.msg_namelen		= 0;
-	msg.msg_iov		= iov;
-	msg.msg_iovlen		= 0;
+	iov_iter_kvec(&msg.msg_iter, WRITE | ITER_KVEC, NULL, 0, 0);
 	msg.msg_control		= NULL;
 	msg.msg_controllen	= 0;
 	msg.msg_flags		= 0;
@@ -806,7 +820,7 @@ void afs_send_empty_reply(struct afs_call *call)
 void afs_send_simple_reply(struct afs_call *call, const void *buf, size_t len)
 {
 	struct msghdr msg;
-	struct iovec iov[1];
+	struct kvec iov[1];
 	int n;
 
 	_enter("");
@@ -815,8 +829,7 @@ void afs_send_simple_reply(struct afs_call *call, const void *buf, size_t len)
 	iov[0].iov_len		= len;
 	msg.msg_name		= NULL;
 	msg.msg_namelen		= 0;
-	msg.msg_iov		= iov;
-	msg.msg_iovlen		= 1;
+	iov_iter_kvec(&msg.msg_iter, WRITE | ITER_KVEC, iov, 1, len);
 	msg.msg_control		= NULL;
 	msg.msg_controllen	= 0;
 	msg.msg_flags		= 0;

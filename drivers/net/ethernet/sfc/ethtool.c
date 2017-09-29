@@ -77,7 +77,6 @@ static const struct efx_sw_stat_desc efx_sw_stat_desc[] = {
 	EFX_ETHTOOL_UINT_CHANNEL_STAT(rx_tcp_udp_chksum_err),
 	EFX_ETHTOOL_UINT_CHANNEL_STAT(rx_mcast_mismatch),
 	EFX_ETHTOOL_UINT_CHANNEL_STAT(rx_frm_trunc),
-	EFX_ETHTOOL_UINT_CHANNEL_STAT(rx_nodesc_trunc),
 	EFX_ETHTOOL_UINT_CHANNEL_STAT(rx_merge_events),
 	EFX_ETHTOOL_UINT_CHANNEL_STAT(rx_merge_packets),
 };
@@ -360,6 +359,37 @@ static int efx_ethtool_fill_self_tests(struct efx_nic *efx,
 	return n;
 }
 
+static size_t efx_describe_per_queue_stats(struct efx_nic *efx, u8 *strings)
+{
+	size_t n_stats = 0;
+	struct efx_channel *channel;
+
+	efx_for_each_channel(channel, efx) {
+		if (efx_channel_has_tx_queues(channel)) {
+			n_stats++;
+			if (strings != NULL) {
+				snprintf(strings, ETH_GSTRING_LEN,
+					 "tx-%u.tx_packets",
+					 channel->tx_queue[0].queue /
+					 EFX_TXQ_TYPES);
+
+				strings += ETH_GSTRING_LEN;
+			}
+		}
+	}
+	efx_for_each_channel(channel, efx) {
+		if (efx_channel_has_rx_queue(channel)) {
+			n_stats++;
+			if (strings != NULL) {
+				snprintf(strings, ETH_GSTRING_LEN,
+					 "rx-%d.rx_packets", channel->channel);
+				strings += ETH_GSTRING_LEN;
+			}
+		}
+	}
+	return n_stats;
+}
+
 static int efx_ethtool_get_sset_count(struct net_device *net_dev,
 				      int string_set)
 {
@@ -368,8 +398,9 @@ static int efx_ethtool_get_sset_count(struct net_device *net_dev,
 	switch (string_set) {
 	case ETH_SS_STATS:
 		return efx->type->describe_stats(efx, NULL) +
-			EFX_ETHTOOL_SW_STAT_COUNT +
-			efx_ptp_describe_stats(efx, NULL);
+		       EFX_ETHTOOL_SW_STAT_COUNT +
+		       efx_describe_per_queue_stats(efx, NULL) +
+		       efx_ptp_describe_stats(efx, NULL);
 	case ETH_SS_TEST:
 		return efx_ethtool_fill_self_tests(efx, NULL, NULL, NULL);
 	default:
@@ -391,6 +422,8 @@ static void efx_ethtool_get_strings(struct net_device *net_dev,
 			strlcpy(strings + i * ETH_GSTRING_LEN,
 				efx_sw_stat_desc[i].name, ETH_GSTRING_LEN);
 		strings += EFX_ETHTOOL_SW_STAT_COUNT * ETH_GSTRING_LEN;
+		strings += (efx_describe_per_queue_stats(efx, strings) *
+			    ETH_GSTRING_LEN);
 		efx_ptp_describe_stats(efx, strings);
 		break;
 	case ETH_SS_TEST:
@@ -410,6 +443,7 @@ static void efx_ethtool_get_stats(struct net_device *net_dev,
 	const struct efx_sw_stat_desc *stat;
 	struct efx_channel *channel;
 	struct efx_tx_queue *tx_queue;
+	struct efx_rx_queue *rx_queue;
 	int i;
 
 	spin_lock_bh(&efx->stats_lock);
@@ -444,6 +478,25 @@ static void efx_ethtool_get_stats(struct net_device *net_dev,
 	data += EFX_ETHTOOL_SW_STAT_COUNT;
 
 	spin_unlock_bh(&efx->stats_lock);
+
+	efx_for_each_channel(channel, efx) {
+		if (efx_channel_has_tx_queues(channel)) {
+			*data = 0;
+			efx_for_each_channel_tx_queue(tx_queue, channel) {
+				*data += tx_queue->tx_packets;
+			}
+			data++;
+		}
+	}
+	efx_for_each_channel(channel, efx) {
+		if (efx_channel_has_rx_queue(channel)) {
+			*data = 0;
+			efx_for_each_channel_rx_queue(rx_queue, channel) {
+				*data += rx_queue->rx_packets;
+			}
+			data++;
+		}
+	}
 
 	efx_ptp_update_stats(efx, data);
 }
@@ -681,7 +734,7 @@ static int efx_ethtool_set_pauseparam(struct net_device *net_dev,
 	/* Reconfigure the MAC. The PHY *may* generate a link state change event
 	 * if the user just changed the advertised capabilities, but there's no
 	 * harm doing this twice */
-	efx->type->reconfigure_mac(efx);
+	efx_mac_reconfigure(efx);
 
 out:
 	mutex_unlock(&efx->mac_lock);
@@ -730,14 +783,26 @@ static int efx_ethtool_reset(struct net_device *net_dev, u32 *flags)
 static const u8 mac_addr_ig_mask[ETH_ALEN] __aligned(2) = {0x01, 0, 0, 0, 0, 0};
 
 #define IP4_ADDR_FULL_MASK	((__force __be32)~0)
+#define IP_PROTO_FULL_MASK	0xFF
 #define PORT_FULL_MASK		((__force __be16)~0)
 #define ETHER_TYPE_FULL_MASK	((__force __be16)~0)
+
+static inline void ip6_fill_mask(__be32 *mask)
+{
+	mask[0] = mask[1] = mask[2] = mask[3] = ~(__be32)0;
+}
 
 static int efx_ethtool_get_class_rule(struct efx_nic *efx,
 				      struct ethtool_rx_flow_spec *rule)
 {
 	struct ethtool_tcpip4_spec *ip_entry = &rule->h_u.tcp_ip4_spec;
 	struct ethtool_tcpip4_spec *ip_mask = &rule->m_u.tcp_ip4_spec;
+	struct ethtool_usrip4_spec *uip_entry = &rule->h_u.usr_ip4_spec;
+	struct ethtool_usrip4_spec *uip_mask = &rule->m_u.usr_ip4_spec;
+	struct ethtool_tcpip6_spec *ip6_entry = &rule->h_u.tcp_ip6_spec;
+	struct ethtool_tcpip6_spec *ip6_mask = &rule->m_u.tcp_ip6_spec;
+	struct ethtool_usrip6_spec *uip6_entry = &rule->h_u.usr_ip6_spec;
+	struct ethtool_usrip6_spec *uip6_mask = &rule->m_u.usr_ip6_spec;
 	struct ethhdr *mac_entry = &rule->h_u.ether_spec;
 	struct ethhdr *mac_mask = &rule->m_u.ether_spec;
 	struct efx_filter_spec spec;
@@ -780,6 +845,35 @@ static int efx_ethtool_get_class_rule(struct efx_nic *efx,
 			ip_entry->psrc = spec.rem_port;
 			ip_mask->psrc = PORT_FULL_MASK;
 		}
+	} else if ((spec.match_flags & EFX_FILTER_MATCH_ETHER_TYPE) &&
+	    spec.ether_type == htons(ETH_P_IPV6) &&
+	    (spec.match_flags & EFX_FILTER_MATCH_IP_PROTO) &&
+	    (spec.ip_proto == IPPROTO_TCP || spec.ip_proto == IPPROTO_UDP) &&
+	    !(spec.match_flags &
+	      ~(EFX_FILTER_MATCH_ETHER_TYPE | EFX_FILTER_MATCH_OUTER_VID |
+		EFX_FILTER_MATCH_LOC_HOST | EFX_FILTER_MATCH_REM_HOST |
+		EFX_FILTER_MATCH_IP_PROTO |
+		EFX_FILTER_MATCH_LOC_PORT | EFX_FILTER_MATCH_REM_PORT))) {
+		rule->flow_type = ((spec.ip_proto == IPPROTO_TCP) ?
+				   TCP_V6_FLOW : UDP_V6_FLOW);
+		if (spec.match_flags & EFX_FILTER_MATCH_LOC_HOST) {
+			memcpy(ip6_entry->ip6dst, spec.loc_host,
+			       sizeof(ip6_entry->ip6dst));
+			ip6_fill_mask(ip6_mask->ip6dst);
+		}
+		if (spec.match_flags & EFX_FILTER_MATCH_REM_HOST) {
+			memcpy(ip6_entry->ip6src, spec.rem_host,
+			       sizeof(ip6_entry->ip6src));
+			ip6_fill_mask(ip6_mask->ip6src);
+		}
+		if (spec.match_flags & EFX_FILTER_MATCH_LOC_PORT) {
+			ip6_entry->pdst = spec.loc_port;
+			ip6_mask->pdst = PORT_FULL_MASK;
+		}
+		if (spec.match_flags & EFX_FILTER_MATCH_REM_PORT) {
+			ip6_entry->psrc = spec.rem_port;
+			ip6_mask->psrc = PORT_FULL_MASK;
+		}
 	} else if (!(spec.match_flags &
 		     ~(EFX_FILTER_MATCH_LOC_MAC | EFX_FILTER_MATCH_LOC_MAC_IG |
 		       EFX_FILTER_MATCH_REM_MAC | EFX_FILTER_MATCH_ETHER_TYPE |
@@ -801,6 +895,47 @@ static int efx_ethtool_get_class_rule(struct efx_nic *efx,
 		if (spec.match_flags & EFX_FILTER_MATCH_ETHER_TYPE) {
 			mac_entry->h_proto = spec.ether_type;
 			mac_mask->h_proto = ETHER_TYPE_FULL_MASK;
+		}
+	} else if (spec.match_flags & EFX_FILTER_MATCH_ETHER_TYPE &&
+		   spec.ether_type == htons(ETH_P_IP) &&
+		   !(spec.match_flags &
+		     ~(EFX_FILTER_MATCH_ETHER_TYPE | EFX_FILTER_MATCH_OUTER_VID |
+		       EFX_FILTER_MATCH_LOC_HOST | EFX_FILTER_MATCH_REM_HOST |
+		       EFX_FILTER_MATCH_IP_PROTO))) {
+		rule->flow_type = IPV4_USER_FLOW;
+		uip_entry->ip_ver = ETH_RX_NFC_IP4;
+		if (spec.match_flags & EFX_FILTER_MATCH_IP_PROTO) {
+			uip_mask->proto = IP_PROTO_FULL_MASK;
+			uip_entry->proto = spec.ip_proto;
+		}
+		if (spec.match_flags & EFX_FILTER_MATCH_LOC_HOST) {
+			uip_entry->ip4dst = spec.loc_host[0];
+			uip_mask->ip4dst = IP4_ADDR_FULL_MASK;
+		}
+		if (spec.match_flags & EFX_FILTER_MATCH_REM_HOST) {
+			uip_entry->ip4src = spec.rem_host[0];
+			uip_mask->ip4src = IP4_ADDR_FULL_MASK;
+		}
+	} else if (spec.match_flags & EFX_FILTER_MATCH_ETHER_TYPE &&
+		   spec.ether_type == htons(ETH_P_IPV6) &&
+		   !(spec.match_flags &
+		     ~(EFX_FILTER_MATCH_ETHER_TYPE | EFX_FILTER_MATCH_OUTER_VID |
+		       EFX_FILTER_MATCH_LOC_HOST | EFX_FILTER_MATCH_REM_HOST |
+		       EFX_FILTER_MATCH_IP_PROTO))) {
+		rule->flow_type = IPV6_USER_FLOW;
+		if (spec.match_flags & EFX_FILTER_MATCH_IP_PROTO) {
+			uip6_mask->l4_proto = IP_PROTO_FULL_MASK;
+			uip6_entry->l4_proto = spec.ip_proto;
+		}
+		if (spec.match_flags & EFX_FILTER_MATCH_LOC_HOST) {
+			memcpy(uip6_entry->ip6dst, spec.loc_host,
+			       sizeof(uip6_entry->ip6dst));
+			ip6_fill_mask(uip6_mask->ip6dst);
+		}
+		if (spec.match_flags & EFX_FILTER_MATCH_REM_HOST) {
+			memcpy(uip6_entry->ip6src, spec.rem_host,
+			       sizeof(uip6_entry->ip6src));
+			ip6_fill_mask(uip6_mask->ip6src);
 		}
 	} else {
 		/* The above should handle all filters that we insert */
@@ -893,11 +1028,27 @@ efx_ethtool_get_rxnfc(struct net_device *net_dev,
 	}
 }
 
+static inline bool ip6_mask_is_full(__be32 mask[4])
+{
+	return !~(mask[0] & mask[1] & mask[2] & mask[3]);
+}
+
+static inline bool ip6_mask_is_empty(__be32 mask[4])
+{
+	return !(mask[0] | mask[1] | mask[2] | mask[3]);
+}
+
 static int efx_ethtool_set_class_rule(struct efx_nic *efx,
 				      struct ethtool_rx_flow_spec *rule)
 {
 	struct ethtool_tcpip4_spec *ip_entry = &rule->h_u.tcp_ip4_spec;
 	struct ethtool_tcpip4_spec *ip_mask = &rule->m_u.tcp_ip4_spec;
+	struct ethtool_usrip4_spec *uip_entry = &rule->h_u.usr_ip4_spec;
+	struct ethtool_usrip4_spec *uip_mask = &rule->m_u.usr_ip4_spec;
+	struct ethtool_tcpip6_spec *ip6_entry = &rule->h_u.tcp_ip6_spec;
+	struct ethtool_tcpip6_spec *ip6_mask = &rule->m_u.tcp_ip6_spec;
+	struct ethtool_usrip6_spec *uip6_entry = &rule->h_u.usr_ip6_spec;
+	struct ethtool_usrip6_spec *uip6_mask = &rule->m_u.usr_ip6_spec;
 	struct ethhdr *mac_entry = &rule->h_u.ether_spec;
 	struct ethhdr *mac_mask = &rule->m_u.ether_spec;
 	struct efx_filter_spec spec;
@@ -957,6 +1108,92 @@ static int efx_ethtool_set_class_rule(struct efx_nic *efx,
 		}
 		if (ip_mask->tos)
 			return -EINVAL;
+		break;
+
+	case TCP_V6_FLOW:
+	case UDP_V6_FLOW:
+		spec.match_flags = (EFX_FILTER_MATCH_ETHER_TYPE |
+				    EFX_FILTER_MATCH_IP_PROTO);
+		spec.ether_type = htons(ETH_P_IPV6);
+		spec.ip_proto = ((rule->flow_type & ~FLOW_EXT) == TCP_V6_FLOW ?
+				 IPPROTO_TCP : IPPROTO_UDP);
+		if (!ip6_mask_is_empty(ip6_mask->ip6dst)) {
+			if (!ip6_mask_is_full(ip6_mask->ip6dst))
+				return -EINVAL;
+			spec.match_flags |= EFX_FILTER_MATCH_LOC_HOST;
+			memcpy(spec.loc_host, ip6_entry->ip6dst, sizeof(spec.loc_host));
+		}
+		if (!ip6_mask_is_empty(ip6_mask->ip6src)) {
+			if (!ip6_mask_is_full(ip6_mask->ip6src))
+				return -EINVAL;
+			spec.match_flags |= EFX_FILTER_MATCH_REM_HOST;
+			memcpy(spec.rem_host, ip6_entry->ip6src, sizeof(spec.rem_host));
+		}
+		if (ip6_mask->pdst) {
+			if (ip6_mask->pdst != PORT_FULL_MASK)
+				return -EINVAL;
+			spec.match_flags |= EFX_FILTER_MATCH_LOC_PORT;
+			spec.loc_port = ip6_entry->pdst;
+		}
+		if (ip6_mask->psrc) {
+			if (ip6_mask->psrc != PORT_FULL_MASK)
+				return -EINVAL;
+			spec.match_flags |= EFX_FILTER_MATCH_REM_PORT;
+			spec.rem_port = ip6_entry->psrc;
+		}
+		if (ip6_mask->tclass)
+			return -EINVAL;
+		break;
+
+	case IPV4_USER_FLOW:
+		if (uip_mask->l4_4_bytes || uip_mask->tos || uip_mask->ip_ver ||
+		    uip_entry->ip_ver != ETH_RX_NFC_IP4)
+			return -EINVAL;
+		spec.match_flags = EFX_FILTER_MATCH_ETHER_TYPE;
+		spec.ether_type = htons(ETH_P_IP);
+		if (uip_mask->ip4dst) {
+			if (uip_mask->ip4dst != IP4_ADDR_FULL_MASK)
+				return -EINVAL;
+			spec.match_flags |= EFX_FILTER_MATCH_LOC_HOST;
+			spec.loc_host[0] = uip_entry->ip4dst;
+		}
+		if (uip_mask->ip4src) {
+			if (uip_mask->ip4src != IP4_ADDR_FULL_MASK)
+				return -EINVAL;
+			spec.match_flags |= EFX_FILTER_MATCH_REM_HOST;
+			spec.rem_host[0] = uip_entry->ip4src;
+		}
+		if (uip_mask->proto) {
+			if (uip_mask->proto != IP_PROTO_FULL_MASK)
+				return -EINVAL;
+			spec.match_flags |= EFX_FILTER_MATCH_IP_PROTO;
+			spec.ip_proto = uip_entry->proto;
+		}
+		break;
+
+	case IPV6_USER_FLOW:
+		if (uip6_mask->l4_4_bytes || uip6_mask->tclass)
+			return -EINVAL;
+		spec.match_flags = EFX_FILTER_MATCH_ETHER_TYPE;
+		spec.ether_type = htons(ETH_P_IPV6);
+		if (!ip6_mask_is_empty(uip6_mask->ip6dst)) {
+			if (!ip6_mask_is_full(uip6_mask->ip6dst))
+				return -EINVAL;
+			spec.match_flags |= EFX_FILTER_MATCH_LOC_HOST;
+			memcpy(spec.loc_host, uip6_entry->ip6dst, sizeof(spec.loc_host));
+		}
+		if (!ip6_mask_is_empty(uip6_mask->ip6src)) {
+			if (!ip6_mask_is_full(uip6_mask->ip6src))
+				return -EINVAL;
+			spec.match_flags |= EFX_FILTER_MATCH_REM_HOST;
+			memcpy(spec.rem_host, uip6_entry->ip6src, sizeof(spec.rem_host));
+		}
+		if (uip6_mask->l4_proto) {
+			if (uip6_mask->l4_proto != IP_PROTO_FULL_MASK)
+				return -EINVAL;
+			spec.match_flags |= EFX_FILTER_MATCH_IP_PROTO;
+			spec.ip_proto = uip6_entry->l4_proto;
+		}
 		break;
 
 	case ETHER_FLOW:
@@ -1033,22 +1270,31 @@ static u32 efx_ethtool_get_rxfh_indir_size(struct net_device *net_dev)
 		0 : ARRAY_SIZE(efx->rx_indir_table));
 }
 
-static int efx_ethtool_get_rxfh(struct net_device *net_dev, u32 *indir, u8 *key)
+static int efx_ethtool_get_rxfh(struct net_device *net_dev, u32 *indir, u8 *key,
+				u8 *hfunc)
 {
 	struct efx_nic *efx = netdev_priv(net_dev);
 
-	memcpy(indir, efx->rx_indir_table, sizeof(efx->rx_indir_table));
+	if (hfunc)
+		*hfunc = ETH_RSS_HASH_TOP;
+	if (indir)
+		memcpy(indir, efx->rx_indir_table, sizeof(efx->rx_indir_table));
 	return 0;
 }
 
-static int efx_ethtool_set_rxfh(struct net_device *net_dev,
-				const u32 *indir, const u8 *key)
+static int efx_ethtool_set_rxfh(struct net_device *net_dev, const u32 *indir,
+				const u8 *key, const u8 hfunc)
 {
 	struct efx_nic *efx = netdev_priv(net_dev);
 
-	memcpy(efx->rx_indir_table, indir, sizeof(efx->rx_indir_table));
-	efx->type->rx_push_rss_config(efx);
-	return 0;
+	/* We do not allow change in unsupported parameters */
+	if (key ||
+	    (hfunc != ETH_RSS_HASH_NO_CHANGE && hfunc != ETH_RSS_HASH_TOP))
+		return -EOPNOTSUPP;
+	if (!indir)
+		return 0;
+
+	return efx->type->rx_push_rss_config(efx, true, indir);
 }
 
 static int efx_ethtool_get_ts_info(struct net_device *net_dev,

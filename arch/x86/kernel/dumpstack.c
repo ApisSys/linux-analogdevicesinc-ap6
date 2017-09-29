@@ -25,10 +25,12 @@ unsigned int code_bytes = 64;
 int kstack_depth_to_print = 3 * STACKSLOTS_PER_LINE;
 static int die_counter;
 
-static void printk_stack_address(unsigned long address, int reliable)
+static void printk_stack_address(unsigned long address, int reliable,
+		void *data)
 {
-	pr_cont(" [<%p>] %s%pB\n",
-		(void *)address, reliable ? "" : "? ", (void *)address);
+	printk("%s [<%p>] %s%pB\n",
+		(char *)data, (void *)address, reliable ? "" : "? ",
+		(void *)address);
 }
 
 void printk_address(unsigned long address)
@@ -133,7 +135,8 @@ print_context_stack_bp(struct thread_info *tinfo,
 		if (!__kernel_text_address(addr))
 			break;
 
-		ops->address(data, addr, 1);
+		if (ops->address(data, addr, 1))
+			break;
 		frame = frame->next_frame;
 		ret_addr = &frame->return_address;
 		print_ftrace_graph_addr(addr, data, ops, tinfo, graph);
@@ -152,11 +155,11 @@ static int print_trace_stack(void *data, char *name)
 /*
  * Print one address/symbol entries per line.
  */
-static void print_trace_address(void *data, unsigned long addr, int reliable)
+static int print_trace_address(void *data, unsigned long addr, int reliable)
 {
 	touch_nmi_watchdog();
-	printk(data);
-	printk_stack_address(addr, reliable);
+	printk_stack_address(addr, reliable, data);
+	return 0;
 }
 
 static const struct stacktrace_ops print_trace_ops = {
@@ -257,17 +260,12 @@ int __die(const char *str, struct pt_regs *regs, long err)
 	unsigned long sp;
 #endif
 	printk(KERN_DEFAULT
-	       "%s: %04lx [#%d] ", str, err & 0xffff, ++die_counter);
-#ifdef CONFIG_PREEMPT
-	printk("PREEMPT ");
-#endif
-#ifdef CONFIG_SMP
-	printk("SMP ");
-#endif
-#ifdef CONFIG_DEBUG_PAGEALLOC
-	printk("DEBUG_PAGEALLOC");
-#endif
-	printk("\n");
+	       "%s: %04lx [#%d]%s%s%s%s\n", str, err & 0xffff, ++die_counter,
+	       IS_ENABLED(CONFIG_PREEMPT) ? " PREEMPT"         : "",
+	       IS_ENABLED(CONFIG_SMP)     ? " SMP"             : "",
+	       debug_pagealloc_enabled()  ? " DEBUG_PAGEALLOC" : "",
+	       IS_ENABLED(CONFIG_KASAN)   ? " KASAN"           : "");
+
 	if (notify_die(DIE_OOPS, str, regs, err,
 			current->thread.trap_nr, SIGSEGV) == NOTIFY_STOP)
 		return 1;
@@ -275,7 +273,7 @@ int __die(const char *str, struct pt_regs *regs, long err)
 	print_modules();
 	show_regs(regs);
 #ifdef CONFIG_X86_32
-	if (user_mode_vm(regs)) {
+	if (user_mode(regs)) {
 		sp = regs->sp;
 		ss = regs->ss & 0xffff;
 	} else {
@@ -304,7 +302,7 @@ void die(const char *str, struct pt_regs *regs, long err)
 	unsigned long flags = oops_begin();
 	int sig = SIGSEGV;
 
-	if (!user_mode_vm(regs))
+	if (!user_mode(regs))
 		report_bug(regs->ip, regs);
 
 	if (__die(str, regs, err))

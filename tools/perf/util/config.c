@@ -10,8 +10,10 @@
  */
 #include "util.h"
 #include "cache.h"
-#include "exec_cmd.h"
+#include <subcmd/exec-cmd.h>
 #include "util/hist.h"  /* perf_hist_config */
+#include "util/llvm-utils.h"   /* perf_llvm_config */
+#include "config.h"
 
 #define MAXNAME (256)
 
@@ -25,7 +27,7 @@ static const char *config_file_name;
 static int config_linenr;
 static int config_file_eof;
 
-static const char *config_exclusive_filename;
+const char *config_exclusive_filename;
 
 static int get_next_char(void)
 {
@@ -222,7 +224,8 @@ static int perf_parse_file(config_fn_t fn, void *data)
 	const unsigned char *bomptr = utf8_bom;
 
 	for (;;) {
-		int c = get_next_char();
+		int line, c = get_next_char();
+
 		if (bomptr && *bomptr) {
 			/* We are at the file beginning; skip UTF8-encoded BOM
 			 * if present. Sane editors won't put this in on their
@@ -261,8 +264,16 @@ static int perf_parse_file(config_fn_t fn, void *data)
 		if (!isalpha(c))
 			break;
 		var[baselen] = tolower(c);
-		if (get_value(fn, data, var, baselen+1) < 0)
+
+		/*
+		 * The get_value function might or might not reach the '\n',
+		 * so saving the current line number for error reporting.
+		 */
+		line = config_linenr;
+		if (get_value(fn, data, var, baselen+1) < 0) {
+			config_linenr = line;
 			break;
+		}
 	}
 	die("bad config file line %d in %s", config_linenr, config_file_name);
 }
@@ -281,6 +292,21 @@ static int parse_unit_factor(const char *end, unsigned long *val)
 	}
 	else if (!strcasecmp(end, "g")) {
 		*val *= 1024 * 1024 * 1024;
+		return 1;
+	}
+	return 0;
+}
+
+static int perf_parse_llong(const char *value, long long *ret)
+{
+	if (value && *value) {
+		char *end;
+		long long val = strtoll(value, &end, 0);
+		unsigned long factor = 1;
+
+		if (!parse_unit_factor(end, &factor))
+			return 0;
+		*ret = val * factor;
 		return 1;
 	}
 	return 0;
@@ -305,6 +331,15 @@ static void die_bad_config(const char *name)
 	if (config_file_name)
 		die("bad config value for '%s' in %s", name, config_file_name);
 	die("bad config value for '%s'", name);
+}
+
+u64 perf_config_u64(const char *name, const char *value)
+{
+	long long ret = 0;
+
+	if (!perf_parse_llong(value, &ret))
+		die_bad_config(name);
+	return (u64) ret;
 }
 
 int perf_config_int(const char *name, const char *value)
@@ -343,10 +378,35 @@ const char *perf_config_dirname(const char *name, const char *value)
 	return value;
 }
 
+static int perf_buildid_config(const char *var, const char *value)
+{
+	/* same dir for all commands */
+	if (!strcmp(var, "buildid.dir")) {
+		const char *dir = perf_config_dirname(var, value);
+
+		if (!dir)
+			return -1;
+		strncpy(buildid_dir, dir, MAXPATHLEN-1);
+		buildid_dir[MAXPATHLEN-1] = '\0';
+	}
+
+	return 0;
+}
+
 static int perf_default_core_config(const char *var __maybe_unused,
 				    const char *value __maybe_unused)
 {
 	/* Add other config variables here. */
+	return 0;
+}
+
+static int perf_ui_config(const char *var, const char *value)
+{
+	/* Add other config variables here. */
+	if (!strcmp(var, "ui.show-headers")) {
+		symbol_conf.show_hist_headers = perf_config_bool(var, value);
+		return 0;
+	}
 	return 0;
 }
 
@@ -358,6 +418,18 @@ int perf_default_config(const char *var, const char *value,
 
 	if (!prefixcmp(var, "hist."))
 		return perf_hist_config(var, value);
+
+	if (!prefixcmp(var, "ui."))
+		return perf_ui_config(var, value);
+
+	if (!prefixcmp(var, "call-graph."))
+		return perf_callchain_config(var, value);
+
+	if (!prefixcmp(var, "llvm."))
+		return perf_llvm_config(var, value);
+
+	if (!prefixcmp(var, "buildid."))
+		return perf_buildid_config(var, value);
 
 	/* Add other config variables here. */
 	return 0;
@@ -381,7 +453,7 @@ static int perf_config_from_file(config_fn_t fn, const char *filename, void *dat
 	return ret;
 }
 
-static const char *perf_etc_perfconfig(void)
+const char *perf_etc_perfconfig(void)
 {
 	static const char *system_wide;
 	if (!system_wide)
@@ -453,6 +525,178 @@ out:
 	return ret;
 }
 
+static struct perf_config_section *find_section(struct list_head *sections,
+						const char *section_name)
+{
+	struct perf_config_section *section;
+
+	list_for_each_entry(section, sections, node)
+		if (!strcmp(section->name, section_name))
+			return section;
+
+	return NULL;
+}
+
+static struct perf_config_item *find_config_item(const char *name,
+						 struct perf_config_section *section)
+{
+	struct perf_config_item *item;
+
+	list_for_each_entry(item, &section->items, node)
+		if (!strcmp(item->name, name))
+			return item;
+
+	return NULL;
+}
+
+static struct perf_config_section *add_section(struct list_head *sections,
+					       const char *section_name)
+{
+	struct perf_config_section *section = zalloc(sizeof(*section));
+
+	if (!section)
+		return NULL;
+
+	INIT_LIST_HEAD(&section->items);
+	section->name = strdup(section_name);
+	if (!section->name) {
+		pr_debug("%s: strdup failed\n", __func__);
+		free(section);
+		return NULL;
+	}
+
+	list_add_tail(&section->node, sections);
+	return section;
+}
+
+static struct perf_config_item *add_config_item(struct perf_config_section *section,
+						const char *name)
+{
+	struct perf_config_item *item = zalloc(sizeof(*item));
+
+	if (!item)
+		return NULL;
+
+	item->name = strdup(name);
+	if (!item->name) {
+		pr_debug("%s: strdup failed\n", __func__);
+		free(item);
+		return NULL;
+	}
+
+	list_add_tail(&item->node, &section->items);
+	return item;
+}
+
+static int set_value(struct perf_config_item *item, const char *value)
+{
+	char *val = strdup(value);
+
+	if (!val)
+		return -1;
+
+	zfree(&item->value);
+	item->value = val;
+	return 0;
+}
+
+static int collect_config(const char *var, const char *value,
+			  void *perf_config_set)
+{
+	int ret = -1;
+	char *ptr, *key;
+	char *section_name, *name;
+	struct perf_config_section *section = NULL;
+	struct perf_config_item *item = NULL;
+	struct perf_config_set *set = perf_config_set;
+	struct list_head *sections = &set->sections;
+
+	key = ptr = strdup(var);
+	if (!key) {
+		pr_debug("%s: strdup failed\n", __func__);
+		return -1;
+	}
+
+	section_name = strsep(&ptr, ".");
+	name = ptr;
+	if (name == NULL || value == NULL)
+		goto out_free;
+
+	section = find_section(sections, section_name);
+	if (!section) {
+		section = add_section(sections, section_name);
+		if (!section)
+			goto out_free;
+	}
+
+	item = find_config_item(name, section);
+	if (!item) {
+		item = add_config_item(section, name);
+		if (!item)
+			goto out_free;
+	}
+
+	ret = set_value(item, value);
+	return ret;
+
+out_free:
+	free(key);
+	perf_config_set__delete(set);
+	return -1;
+}
+
+struct perf_config_set *perf_config_set__new(void)
+{
+	struct perf_config_set *set = zalloc(sizeof(*set));
+
+	if (set) {
+		INIT_LIST_HEAD(&set->sections);
+		perf_config(collect_config, set);
+	}
+
+	return set;
+}
+
+static void perf_config_item__delete(struct perf_config_item *item)
+{
+	zfree(&item->name);
+	zfree(&item->value);
+	free(item);
+}
+
+static void perf_config_section__purge(struct perf_config_section *section)
+{
+	struct perf_config_item *item, *tmp;
+
+	list_for_each_entry_safe(item, tmp, &section->items, node) {
+		list_del_init(&item->node);
+		perf_config_item__delete(item);
+	}
+}
+
+static void perf_config_section__delete(struct perf_config_section *section)
+{
+	perf_config_section__purge(section);
+	zfree(&section->name);
+	free(section);
+}
+
+static void perf_config_set__purge(struct perf_config_set *set)
+{
+	struct perf_config_section *section, *tmp;
+
+	list_for_each_entry_safe(section, tmp, &set->sections, node) {
+		list_del_init(&section->node);
+		perf_config_section__delete(section);
+	}
+}
+
+void perf_config_set__delete(struct perf_config_set *set)
+{
+	perf_config_set__purge(set);
+	free(set);
+}
+
 /*
  * Call this to report error for your variable that should not
  * get a boolean value (i.e. "[my] var" means "true").
@@ -462,47 +706,18 @@ int config_error_nonbool(const char *var)
 	return error("Missing value for '%s'", var);
 }
 
-struct buildid_dir_config {
-	char *dir;
-};
-
-static int buildid_dir_command_config(const char *var, const char *value,
-				      void *data)
+void set_buildid_dir(const char *dir)
 {
-	struct buildid_dir_config *c = data;
-	const char *v;
-
-	/* same dir for all commands */
-	if (!prefixcmp(var, "buildid.") && !strcmp(var + 8, "dir")) {
-		v = perf_config_dirname(var, value);
-		if (!v)
-			return -1;
-		strncpy(c->dir, v, MAXPATHLEN-1);
-		c->dir[MAXPATHLEN-1] = '\0';
-	}
-	return 0;
-}
-
-static void check_buildid_dir_config(void)
-{
-	struct buildid_dir_config c;
-	c.dir = buildid_dir;
-	perf_config(buildid_dir_command_config, &c);
-}
-
-void set_buildid_dir(void)
-{
-	buildid_dir[0] = '\0';
-
-	/* try config file */
-	check_buildid_dir_config();
+	if (dir)
+		scnprintf(buildid_dir, MAXPATHLEN-1, "%s", dir);
 
 	/* default to $HOME/.debug */
 	if (buildid_dir[0] == '\0') {
-		char *v = getenv("HOME");
-		if (v) {
+		char *home = getenv("HOME");
+
+		if (home) {
 			snprintf(buildid_dir, MAXPATHLEN-1, "%s/%s",
-				 v, DEBUG_CACHE_DIR);
+				 home, DEBUG_CACHE_DIR);
 		} else {
 			strncpy(buildid_dir, DEBUG_CACHE_DIR, MAXPATHLEN-1);
 		}

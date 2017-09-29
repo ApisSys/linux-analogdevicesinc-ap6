@@ -46,13 +46,11 @@
 
 #define DEBUG_SUBSYSTEM S_LOG
 
-#include <linux/libcfs/libcfs.h>
+#include "../../include/linux/libcfs/libcfs.h"
 
-#include <obd_class.h>
-#include <lustre_log.h>
+#include "../include/obd_class.h"
+#include "../include/lustre_log.h"
 #include <linux/list.h>
-#include <lvfs.h>
-#include <lustre_fsfilt.h>
 
 int llog_initiator_connect(struct llog_ctxt *ctxt)
 {
@@ -60,7 +58,7 @@ int llog_initiator_connect(struct llog_ctxt *ctxt)
 
 	LASSERT(ctxt);
 	new_imp = ctxt->loc_obd->u.cli.cl_import;
-	LASSERTF(ctxt->loc_imp == NULL || ctxt->loc_imp == new_imp,
+	LASSERTF(!ctxt->loc_imp || ctxt->loc_imp == new_imp,
 		 "%p - %p\n", ctxt->loc_imp, new_imp);
 	mutex_lock(&ctxt->loc_mutex);
 	if (ctxt->loc_imp != new_imp) {

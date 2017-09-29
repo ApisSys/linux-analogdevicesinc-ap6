@@ -54,7 +54,7 @@ static void print_extent_data_ref(struct extent_buffer *eb,
 	       btrfs_extent_data_ref_count(eb, ref));
 }
 
-static void print_extent_item(struct extent_buffer *eb, int slot)
+static void print_extent_item(struct extent_buffer *eb, int slot, int type)
 {
 	struct btrfs_extent_item *ei;
 	struct btrfs_extent_inline_ref *iref;
@@ -63,7 +63,6 @@ static void print_extent_item(struct extent_buffer *eb, int slot)
 	struct btrfs_disk_key key;
 	unsigned long end;
 	unsigned long ptr;
-	int type;
 	u32 item_size = btrfs_item_size_nr(eb, slot);
 	u64 flags;
 	u64 offset;
@@ -88,7 +87,8 @@ static void print_extent_item(struct extent_buffer *eb, int slot)
 	       btrfs_extent_refs(eb, ei), btrfs_extent_generation(eb, ei),
 	       flags);
 
-	if (flags & BTRFS_EXTENT_FLAG_TREE_BLOCK) {
+	if ((type == BTRFS_EXTENT_ITEM_KEY) &&
+	    flags & BTRFS_EXTENT_FLAG_TREE_BLOCK) {
 		struct btrfs_tree_block_info *info;
 		info = (struct btrfs_tree_block_info *)(ei + 1);
 		btrfs_tree_block_key(eb, info, &key);
@@ -195,7 +195,7 @@ void btrfs_print_leaf(struct btrfs_root *root, struct extent_buffer *l)
 	for (i = 0 ; i < nr ; i++) {
 		item = btrfs_item_nr(i);
 		btrfs_item_key_to_cpu(l, &key, i);
-		type = btrfs_key_type(&key);
+		type = key.type;
 		printk(KERN_INFO "\titem %d key (%llu %u %llu) itemoff %d "
 		       "itemsize %d\n",
 			i, key.objectid, type, key.offset,
@@ -223,7 +223,8 @@ void btrfs_print_leaf(struct btrfs_root *root, struct extent_buffer *l)
 				btrfs_disk_root_refs(l, ri));
 			break;
 		case BTRFS_EXTENT_ITEM_KEY:
-			print_extent_item(l, i);
+		case BTRFS_METADATA_ITEM_KEY:
+			print_extent_item(l, i, type);
 			break;
 		case BTRFS_TREE_BLOCK_REF_KEY:
 			printk(KERN_INFO "\t\ttree block backref\n");
@@ -294,8 +295,27 @@ void btrfs_print_leaf(struct btrfs_root *root, struct extent_buffer *l)
 			       btrfs_dev_extent_chunk_offset(l, dev_extent),
 			       btrfs_dev_extent_length(l, dev_extent));
 			break;
-		case BTRFS_DEV_STATS_KEY:
-			printk(KERN_INFO "\t\tdevice stats\n");
+		case BTRFS_PERSISTENT_ITEM_KEY:
+			printk(KERN_INFO "\t\tpersistent item objectid %llu offset %llu\n",
+					key.objectid, key.offset);
+			switch (key.objectid) {
+			case BTRFS_DEV_STATS_OBJECTID:
+				printk(KERN_INFO "\t\tdevice stats\n");
+				break;
+			default:
+				printk(KERN_INFO "\t\tunknown persistent item\n");
+			}
+			break;
+		case BTRFS_TEMPORARY_ITEM_KEY:
+			printk(KERN_INFO "\t\ttemporary item objectid %llu offset %llu\n",
+					key.objectid, key.offset);
+			switch (key.objectid) {
+			case BTRFS_BALANCE_OBJECTID:
+				printk(KERN_INFO "\t\tbalance status\n");
+				break;
+			default:
+				printk(KERN_INFO "\t\tunknown temporary item\n");
+			}
 			break;
 		case BTRFS_DEV_REPLACE_KEY:
 			printk(KERN_INFO "\t\tdev replace\n");
@@ -335,7 +355,6 @@ void btrfs_print_tree(struct btrfs_root *root, struct extent_buffer *c)
 	for (i = 0; i < nr; i++) {
 		struct extent_buffer *next = read_tree_block(root,
 					btrfs_node_blockptr(c, i),
-					btrfs_level_size(root, level - 1),
 					btrfs_node_ptr_generation(c, i));
 		if (btrfs_is_leaf(next) &&
 		   level != 1)

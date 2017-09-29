@@ -60,7 +60,7 @@ static int clps711x_pwm_request(struct pwm_chip *chip, struct pwm_device *pwm)
 		return -EINVAL;
 
 	/* Store constant period value */
-	pwm_set_period(pwm, DIV_ROUND_CLOSEST(NSEC_PER_SEC, freq));
+	pwm->args.period = DIV_ROUND_CLOSEST(NSEC_PER_SEC, freq);
 
 	return 0;
 }
@@ -163,7 +163,6 @@ MODULE_DEVICE_TABLE(of, clps711x_pwm_dt_ids);
 static struct platform_driver clps711x_pwm_driver = {
 	.driver = {
 		.name = "clps711x-pwm",
-		.owner = THIS_MODULE,
 		.of_match_table = of_match_ptr(clps711x_pwm_dt_ids),
 	},
 	.probe = clps711x_pwm_probe,

@@ -32,6 +32,9 @@
 #define WLAN_NV_FILE               "wlan/prima/WCNSS_qcom_wlan_nv.bin"
 #define WCN36XX_AGGR_BUFFER_SIZE 64
 
+/* How many frames until we start a-mpdu TX session */
+#define WCN36XX_AMPDU_START_THRESH	20
+
 extern unsigned int wcn36xx_dbg_mask;
 
 enum wcn36xx_debug_mask {
@@ -74,6 +77,13 @@ enum wcn36xx_debug_mask {
 			       buf, len, false);		\
 } while (0)
 
+enum wcn36xx_ampdu_state {
+	WCN36XX_AMPDU_NONE,
+	WCN36XX_AMPDU_INIT,
+	WCN36XX_AMPDU_START,
+	WCN36XX_AMPDU_OPERATIONAL,
+};
+
 #define WCN36XX_HW_CHANNEL(__wcn) (__wcn->hw->conf.chandef.chan->hw_value)
 #define WCN36XX_BAND(__wcn) (__wcn->hw->conf.chandef.chan->band)
 #define WCN36XX_CENTER_FREQ(__wcn) (__wcn->hw->conf.chandef.chan->center_freq)
@@ -115,10 +125,10 @@ struct wcn36xx_platform_ctrl_ops {
  */
 struct wcn36xx_vif {
 	struct list_head list;
-	struct wcn36xx_sta *sta;
 	u8 dtim_period;
 	enum ani_ed_type encrypt_type;
 	bool is_joining;
+	bool sta_assoc;
 	struct wcn36xx_hal_mac_ssid ssid;
 
 	/* Power management */
@@ -165,6 +175,10 @@ struct wcn36xx_sta {
 	bool is_data_encrypted;
 	/* Rates */
 	struct wcn36xx_hal_supported_rates supported_rates;
+
+	spinlock_t ampdu_lock;		/* protects next two fields */
+	enum wcn36xx_ampdu_state ampdu_state[16];
+	int non_agg_frame_ct;
 };
 struct wcn36xx_dxe_ch;
 struct wcn36xx {
@@ -242,5 +256,29 @@ static inline bool wcn36xx_is_fw_version(struct wcn36xx *wcn,
 		wcn->fw_revision == revision);
 }
 void wcn36xx_set_default_rates(struct wcn36xx_hal_supported_rates *rates);
+
+static inline
+struct ieee80211_sta *wcn36xx_priv_to_sta(struct wcn36xx_sta *sta_priv)
+{
+	return container_of((void *)sta_priv, struct ieee80211_sta, drv_priv);
+}
+
+static inline
+struct wcn36xx_vif *wcn36xx_vif_to_priv(struct ieee80211_vif *vif)
+{
+	return (struct wcn36xx_vif *) vif->drv_priv;
+}
+
+static inline
+struct ieee80211_vif *wcn36xx_priv_to_vif(struct wcn36xx_vif *vif_priv)
+{
+	return container_of((void *) vif_priv, struct ieee80211_vif, drv_priv);
+}
+
+static inline
+struct wcn36xx_sta *wcn36xx_sta_to_priv(struct ieee80211_sta *sta)
+{
+	return (struct wcn36xx_sta *)sta->drv_priv;
+}
 
 #endif	/* _WCN36XX_H_ */

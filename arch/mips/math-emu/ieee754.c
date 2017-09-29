@@ -34,12 +34,21 @@
  * Special constants
  */
 
-#define DPCNST(s, b, m)							\
+/*
+ * Older GCC requires the inner braces for initialization of union ieee754dp's
+ * anonymous struct member.  Without an error will result.
+ */
+#define xPCNST(s, b, m, ebias)						\
 {									\
-	.sign	= (s),							\
-	.bexp	= (b) + DP_EBIAS,					\
-	.mant	= (m)							\
+	{								\
+		.sign	= (s),						\
+		.bexp	= (b) + ebias,					\
+		.mant	= (m)						\
+	}								\
 }
+
+#define DPCNST(s, b, m)							\
+	xPCNST(s, b, m, DP_EBIAS)
 
 const union ieee754dp __ieee754dp_spcvals[] = {
 	DPCNST(0, DP_EMIN - 1, 0x0000000000000ULL),	/* + zero   */
@@ -50,7 +59,8 @@ const union ieee754dp __ieee754dp_spcvals[] = {
 	DPCNST(1, 3,           0x4000000000000ULL),	/* - 10.0   */
 	DPCNST(0, DP_EMAX + 1, 0x0000000000000ULL),	/* + infinity */
 	DPCNST(1, DP_EMAX + 1, 0x0000000000000ULL),	/* - infinity */
-	DPCNST(0, DP_EMAX + 1, 0x7FFFFFFFFFFFFULL),	/* + indef quiet Nan */
+	DPCNST(0, DP_EMAX + 1, 0x7FFFFFFFFFFFFULL),	/* + ind legacy qNaN */
+	DPCNST(0, DP_EMAX + 1, 0x8000000000000ULL),	/* + indef 2008 qNaN */
 	DPCNST(0, DP_EMAX,     0xFFFFFFFFFFFFFULL),	/* + max */
 	DPCNST(1, DP_EMAX,     0xFFFFFFFFFFFFFULL),	/* - max */
 	DPCNST(0, DP_EMIN,     0x0000000000000ULL),	/* + min normal */
@@ -62,11 +72,7 @@ const union ieee754dp __ieee754dp_spcvals[] = {
 };
 
 #define SPCNST(s, b, m)							\
-{									\
-	.sign	= (s),							\
-	.bexp	= (b) + SP_EBIAS,					\
-	.mant	= (m)							\
-}
+	xPCNST(s, b, m, SP_EBIAS)
 
 const union ieee754sp __ieee754sp_spcvals[] = {
 	SPCNST(0, SP_EMIN - 1, 0x000000),	/* + zero   */
@@ -77,7 +83,8 @@ const union ieee754sp __ieee754sp_spcvals[] = {
 	SPCNST(1, 3,	       0x200000),	/* - 10.0   */
 	SPCNST(0, SP_EMAX + 1, 0x000000),	/* + infinity */
 	SPCNST(1, SP_EMAX + 1, 0x000000),	/* - infinity */
-	SPCNST(0, SP_EMAX + 1, 0x3FFFFF),	/* + indef quiet Nan  */
+	SPCNST(0, SP_EMAX + 1, 0x3FFFFF),	/* + indef legacy quiet NaN */
+	SPCNST(0, SP_EMAX + 1, 0x400000),	/* + indef 2008 quiet NaN */
 	SPCNST(0, SP_EMAX,     0x7FFFFF),	/* + max normal */
 	SPCNST(1, SP_EMAX,     0x7FFFFF),	/* - max normal */
 	SPCNST(0, SP_EMIN,     0x000000),	/* + min normal */

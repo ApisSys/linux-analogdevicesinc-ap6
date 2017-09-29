@@ -16,12 +16,16 @@
 
 #include <linux/module.h>
 #include <linux/of_device.h>
-#include <linux/regulator/consumer.h>
 #include <linux/delay.h>
 #include <linux/mmc/mmc.h>
 #include <linux/slab.h>
 
 #include "sdhci-pltfm.h"
+
+#define CORE_MCI_VERSION		0x50
+#define CORE_VERSION_MAJOR_SHIFT	28
+#define CORE_VERSION_MAJOR_MASK		(0xf << CORE_VERSION_MAJOR_SHIFT)
+#define CORE_VERSION_MINOR_MASK		0xff
 
 #define CORE_HC_MODE		0x78
 #define HC_MODE_EN		0x1
@@ -42,28 +46,12 @@
 #define CORE_VENDOR_SPEC	0x10c
 #define CORE_CLK_PWRSAVE	BIT(1)
 
+#define CORE_VENDOR_SPEC_CAPABILITIES0	0x11c
+
 #define CDR_SELEXT_SHIFT	20
 #define CDR_SELEXT_MASK		(0xf << CDR_SELEXT_SHIFT)
 #define CMUX_SHIFT_PHASE_SHIFT	24
 #define CMUX_SHIFT_PHASE_MASK	(7 << CMUX_SHIFT_PHASE_SHIFT)
-
-static const u32 tuning_block_64[] = {
-	0x00ff0fff, 0xccc3ccff, 0xffcc3cc3, 0xeffefffe,
-	0xddffdfff, 0xfbfffbff, 0xff7fffbf, 0xefbdf777,
-	0xf0fff0ff, 0x3cccfc0f, 0xcfcc33cc, 0xeeffefff,
-	0xfdfffdff, 0xffbfffdf, 0xfff7ffbb, 0xde7b7ff7
-};
-
-static const u32 tuning_block_128[] = {
-	0xff00ffff, 0x0000ffff, 0xccccffff, 0xcccc33cc,
-	0xcc3333cc, 0xffffcccc, 0xffffeeff, 0xffeeeeff,
-	0xffddffff, 0xddddffff, 0xbbffffff, 0xbbffffff,
-	0xffffffbb, 0xffffff77, 0x77ff7777, 0xffeeddbb,
-	0x00ffffff, 0x00ffffff, 0xccffff00, 0xcc33cccc,
-	0x3333cccc, 0xffcccccc, 0xffeeffff, 0xeeeeffff,
-	0xddffffff, 0xddffffff, 0xffffffdd, 0xffffffbb,
-	0xffffbbbb, 0xffff77ff, 0xff7777ff, 0xeeddbb77
-};
 
 struct sdhci_msm_host {
 	struct platform_device *pdev;
@@ -72,7 +60,6 @@ struct sdhci_msm_host {
 	struct clk *pclk;	/* SDHC peripheral bus clock */
 	struct clk *bus_clk;	/* SDHC bus voter clock */
 	struct mmc_host *mmc;
-	struct sdhci_pltfm_data sdhci_msm_pdata;
 };
 
 /* Platform specific tuning */
@@ -358,9 +345,7 @@ static int msm_init_cm_dll(struct sdhci_host *host)
 static int sdhci_msm_execute_tuning(struct sdhci_host *host, u32 opcode)
 {
 	int tuning_seq_cnt = 3;
-	u8 phase, *data_buf, tuned_phases[16], tuned_phase_cnt = 0;
-	const u32 *tuning_block_pattern = tuning_block_64;
-	int size = sizeof(tuning_block_64);	/* Pattern size in bytes */
+	u8 phase, tuned_phases[16], tuned_phase_cnt = 0;
 	int rc;
 	struct mmc_host *mmc = host->mmc;
 	struct mmc_ios ios = host->mmc->ios;
@@ -374,53 +359,21 @@ static int sdhci_msm_execute_tuning(struct sdhci_host *host, u32 opcode)
 	      (ios.timing == MMC_TIMING_UHS_SDR104)))
 		return 0;
 
-	if ((opcode == MMC_SEND_TUNING_BLOCK_HS200) &&
-	    (mmc->ios.bus_width == MMC_BUS_WIDTH_8)) {
-		tuning_block_pattern = tuning_block_128;
-		size = sizeof(tuning_block_128);
-	}
-
-	data_buf = kmalloc(size, GFP_KERNEL);
-	if (!data_buf)
-		return -ENOMEM;
-
 retry:
 	/* First of all reset the tuning block */
 	rc = msm_init_cm_dll(host);
 	if (rc)
-		goto out;
+		return rc;
 
 	phase = 0;
 	do {
-		struct mmc_command cmd = { 0 };
-		struct mmc_data data = { 0 };
-		struct mmc_request mrq = {
-			.cmd = &cmd,
-			.data = &data
-		};
-		struct scatterlist sg;
-
 		/* Set the phase in delay line hw block */
 		rc = msm_config_cm_dll_phase(host, phase);
 		if (rc)
-			goto out;
+			return rc;
 
-		cmd.opcode = opcode;
-		cmd.flags = MMC_RSP_R1 | MMC_CMD_ADTC;
-
-		data.blksz = size;
-		data.blocks = 1;
-		data.flags = MMC_DATA_READ;
-		data.timeout_ns = NSEC_PER_SEC;	/* 1 second */
-
-		data.sg = &sg;
-		data.sg_len = 1;
-		sg_init_one(&sg, data_buf, size);
-		memset(data_buf, 0, size);
-		mmc_wait_for_req(mmc, &mrq);
-
-		if (!cmd.error && !data.error &&
-		    !memcmp(data_buf, tuning_block_pattern, size)) {
+		rc = mmc_send_tuning(mmc, opcode, NULL);
+		if (!rc) {
 			/* Tuning is successful at this tuning point */
 			tuned_phases[tuned_phase_cnt++] = phase;
 			dev_dbg(mmc_dev(mmc), "%s: Found good phase = %d\n",
@@ -432,7 +385,7 @@ retry:
 		rc = msm_find_most_appropriate_phase(host, tuned_phases,
 						     tuned_phase_cnt);
 		if (rc < 0)
-			goto out;
+			return rc;
 		else
 			phase = rc;
 
@@ -442,7 +395,7 @@ retry:
 		 */
 		rc = msm_config_cm_dll_phase(host, phase);
 		if (rc)
-			goto out;
+			return rc;
 		dev_dbg(mmc_dev(mmc), "%s: Setting the tuning phase to %d\n",
 			 mmc_hostname(mmc), phase);
 	} else {
@@ -454,8 +407,6 @@ retry:
 		rc = -EIO;
 	}
 
-out:
-	kfree(data_buf);
 	return rc;
 }
 
@@ -466,12 +417,18 @@ static const struct of_device_id sdhci_msm_dt_match[] = {
 
 MODULE_DEVICE_TABLE(of, sdhci_msm_dt_match);
 
-static struct sdhci_ops sdhci_msm_ops = {
+static const struct sdhci_ops sdhci_msm_ops = {
 	.platform_execute_tuning = sdhci_msm_execute_tuning,
 	.reset = sdhci_reset,
 	.set_clock = sdhci_set_clock,
 	.set_bus_width = sdhci_set_bus_width,
 	.set_uhs_signaling = sdhci_set_uhs_signaling,
+};
+
+static const struct sdhci_pltfm_data sdhci_msm_pdata = {
+	.quirks = SDHCI_QUIRK_BROKEN_CARD_DETECTION |
+		  SDHCI_QUIRK_SINGLE_POWER_WRITE,
+	.ops = &sdhci_msm_ops,
 };
 
 static int sdhci_msm_probe(struct platform_device *pdev)
@@ -481,19 +438,16 @@ static int sdhci_msm_probe(struct platform_device *pdev)
 	struct sdhci_msm_host *msm_host;
 	struct resource *core_memres;
 	int ret;
-	u16 host_version;
+	u16 host_version, core_minor;
+	u32 core_version, caps;
+	u8 core_major;
 
-	msm_host = devm_kzalloc(&pdev->dev, sizeof(*msm_host), GFP_KERNEL);
-	if (!msm_host)
-		return -ENOMEM;
-
-	msm_host->sdhci_msm_pdata.ops = &sdhci_msm_ops;
-	host = sdhci_pltfm_init(pdev, &msm_host->sdhci_msm_pdata, 0);
+	host = sdhci_pltfm_init(pdev, &sdhci_msm_pdata, sizeof(*msm_host));
 	if (IS_ERR(host))
 		return PTR_ERR(host);
 
 	pltfm_host = sdhci_priv(host);
-	pltfm_host->priv = msm_host;
+	msm_host = sdhci_pltfm_priv(pltfm_host);
 	msm_host->mmc = host->mmc;
 	msm_host->pdev = pdev;
 
@@ -535,6 +489,11 @@ static int sdhci_msm_probe(struct platform_device *pdev)
 		goto pclk_disable;
 	}
 
+	/* Vote for maximum clock rate for maximum performance */
+	ret = clk_set_rate(msm_host->clk, INT_MAX);
+	if (ret)
+		dev_warn(&pdev->dev, "core clock boost failed\n");
+
 	ret = clk_prepare_enable(msm_host->clk);
 	if (ret)
 		goto pclk_disable;
@@ -563,13 +522,28 @@ static int sdhci_msm_probe(struct platform_device *pdev)
 	/* Set HC_MODE_EN bit in HC_MODE register */
 	writel_relaxed(HC_MODE_EN, (msm_host->core_mem + CORE_HC_MODE));
 
-	host->quirks |= SDHCI_QUIRK_BROKEN_CARD_DETECTION;
-	host->quirks |= SDHCI_QUIRK_SINGLE_POWER_WRITE;
-
 	host_version = readw_relaxed((host->ioaddr + SDHCI_HOST_VERSION));
 	dev_dbg(&pdev->dev, "Host Version: 0x%x Vendor Version 0x%x\n",
 		host_version, ((host_version & SDHCI_VENDOR_VER_MASK) >>
 			       SDHCI_VENDOR_VER_SHIFT));
+
+	core_version = readl_relaxed(msm_host->core_mem + CORE_MCI_VERSION);
+	core_major = (core_version & CORE_VERSION_MAJOR_MASK) >>
+		      CORE_VERSION_MAJOR_SHIFT;
+	core_minor = core_version & CORE_VERSION_MINOR_MASK;
+	dev_dbg(&pdev->dev, "MCI Version: 0x%08x, major: 0x%04x, minor: 0x%02x\n",
+		core_version, core_major, core_minor);
+
+	/*
+	 * Support for some capabilities is not advertised by newer
+	 * controller versions and must be explicitly enabled.
+	 */
+	if (core_major >= 1 && core_minor != 0x11 && core_minor != 0x12) {
+		caps = readl_relaxed(host->ioaddr + SDHCI_CAPABILITIES);
+		caps |= SDHCI_CAN_VDD_300 | SDHCI_CAN_DO_8BIT;
+		writel_relaxed(caps, host->ioaddr +
+			       CORE_VENDOR_SPEC_CAPABILITIES0);
+	}
 
 	ret = sdhci_add_host(host);
 	if (ret)
@@ -593,16 +567,16 @@ static int sdhci_msm_remove(struct platform_device *pdev)
 {
 	struct sdhci_host *host = platform_get_drvdata(pdev);
 	struct sdhci_pltfm_host *pltfm_host = sdhci_priv(host);
-	struct sdhci_msm_host *msm_host = pltfm_host->priv;
+	struct sdhci_msm_host *msm_host = sdhci_pltfm_priv(pltfm_host);
 	int dead = (readl_relaxed(host->ioaddr + SDHCI_INT_STATUS) ==
 		    0xffffffff);
 
 	sdhci_remove_host(host, dead);
-	sdhci_pltfm_free(pdev);
 	clk_disable_unprepare(msm_host->clk);
 	clk_disable_unprepare(msm_host->pclk);
 	if (!IS_ERR(msm_host->bus_clk))
 		clk_disable_unprepare(msm_host->bus_clk);
+	sdhci_pltfm_free(pdev);
 	return 0;
 }
 
@@ -611,7 +585,6 @@ static struct platform_driver sdhci_msm_driver = {
 	.remove = sdhci_msm_remove,
 	.driver = {
 		   .name = "sdhci_msm",
-		   .owner = THIS_MODULE,
 		   .of_match_table = sdhci_msm_dt_match,
 	},
 };

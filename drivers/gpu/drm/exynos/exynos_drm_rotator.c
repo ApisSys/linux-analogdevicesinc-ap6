@@ -20,7 +20,6 @@
 #include <drm/drmP.h>
 #include <drm/exynos_drm.h>
 #include "regs-rotator.h"
-#include "exynos_drm.h"
 #include "exynos_drm_drv.h"
 #include "exynos_drm_ipp.h"
 
@@ -156,8 +155,7 @@ static irqreturn_t rotator_irq_handler(int irq, void *arg)
 		event_work->ippdrv = ippdrv;
 		event_work->buf_id[EXYNOS_DRM_OPS_DST] =
 			rot->cur_buf_id[EXYNOS_DRM_OPS_DST];
-		queue_work(ippdrv->event_workq,
-			(struct work_struct *)event_work);
+		queue_work(ippdrv->event_workq, &event_work->work);
 	} else {
 		DRM_ERROR("the SFR is set illegally\n");
 	}
@@ -691,6 +689,7 @@ static const struct of_device_id exynos_rotator_match[] = {
 	},
 	{},
 };
+MODULE_DEVICE_TABLE(of, exynos_rotator_match);
 
 static int rotator_probe(struct platform_device *pdev)
 {
@@ -754,7 +753,7 @@ static int rotator_probe(struct platform_device *pdev)
 		goto err_ippdrv_register;
 	}
 
-	DRM_DEBUG_KMS("ippdrv[0x%x]\n", (int)ippdrv);
+	DRM_DEBUG_KMS("ippdrv[%p]\n", ippdrv);
 
 	platform_set_drvdata(pdev, rot);
 
@@ -786,13 +785,14 @@ static int rotator_remove(struct platform_device *pdev)
 	return 0;
 }
 
+#ifdef CONFIG_PM
 static int rotator_clk_crtl(struct rot_context *rot, bool enable)
 {
 	if (enable) {
-		clk_enable(rot->clock);
+		clk_prepare_enable(rot->clock);
 		rot->suspended = false;
 	} else {
-		clk_disable(rot->clock);
+		clk_disable_unprepare(rot->clock);
 		rot->suspended = true;
 	}
 
@@ -822,7 +822,6 @@ static int rotator_resume(struct device *dev)
 }
 #endif
 
-#ifdef CONFIG_PM_RUNTIME
 static int rotator_runtime_suspend(struct device *dev)
 {
 	struct rot_context *rot = dev_get_drvdata(dev);

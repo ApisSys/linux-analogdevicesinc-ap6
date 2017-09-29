@@ -30,7 +30,7 @@
 			label = "BP1";
 			gpios = <&gpio3 18 GPIO_ACTIVE_LOW>;
 			linux,code = <BTN_MISC>;
-			gpio-key,wakeup;
+			wakeup-source;
 		};
 	};
 
@@ -155,7 +155,6 @@
 
 &ssi1 {
 	codec-handle = <&tlv320aic23>;
-	fsl,mode = "i2s-slave";
 	status = "okay";
 };
 

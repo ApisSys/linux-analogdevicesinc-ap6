@@ -8,8 +8,7 @@
  * Common Clock Framework support for all S3C64xx SoCs.
 */
 
-#include <linux/clk.h>
-#include <linux/clkdev.h>
+#include <linux/slab.h>
 #include <linux/clk-provider.h>
 #include <linux/of.h>
 #include <linux/of_address.h>
@@ -177,14 +176,14 @@ PNAME(audio2_p6410)	= { "mout_epll", "dout_mpll", "fin_pll", "iiscdclk2",
 
 /* Fixed rate clocks generated outside the SoC. */
 FIXED_RATE_CLOCKS(s3c64xx_fixed_rate_ext_clks) __initdata = {
-	FRATE(0, "fin_pll", NULL, CLK_IS_ROOT, 0),
-	FRATE(0, "xusbxti", NULL, CLK_IS_ROOT, 0),
+	FRATE(0, "fin_pll", NULL, 0, 0),
+	FRATE(0, "xusbxti", NULL, 0, 0),
 };
 
 /* Fixed rate clocks generated inside the SoC. */
 FIXED_RATE_CLOCKS(s3c64xx_fixed_rate_clks) __initdata = {
-	FRATE(CLK27M, "clk27m", NULL, CLK_IS_ROOT, 27000000),
-	FRATE(CLK48M, "clk48m", NULL, CLK_IS_ROOT, 48000000),
+	FRATE(CLK27M, "clk27m", NULL, 0, 27000000),
+	FRATE(CLK48M, "clk48m", NULL, 0, 48000000),
 };
 
 /* List of clock muxes present on all S3C64xx SoCs. */
@@ -418,8 +417,10 @@ static struct samsung_clock_alias s3c64xx_clock_aliases[] = {
 	ALIAS(SCLK_MMC2, "s3c-sdhci.2", "mmc_busclk.2"),
 	ALIAS(SCLK_MMC1, "s3c-sdhci.1", "mmc_busclk.2"),
 	ALIAS(SCLK_MMC0, "s3c-sdhci.0", "mmc_busclk.2"),
-	ALIAS(SCLK_SPI1, "s3c6410-spi.1", "spi-bus"),
-	ALIAS(SCLK_SPI0, "s3c6410-spi.0", "spi-bus"),
+	ALIAS(PCLK_SPI1, "s3c6410-spi.1", "spi_busclk0"),
+	ALIAS(SCLK_SPI1, "s3c6410-spi.1", "spi_busclk2"),
+	ALIAS(PCLK_SPI0, "s3c6410-spi.0", "spi_busclk0"),
+	ALIAS(SCLK_SPI0, "s3c6410-spi.0", "spi_busclk2"),
 	ALIAS(SCLK_AUDIO1, "samsung-pcm.1", "audio-bus"),
 	ALIAS(SCLK_AUDIO1, "samsung-i2s.1", "audio-bus"),
 	ALIAS(SCLK_AUDIO0, "samsung-pcm.0", "audio-bus"),
@@ -515,6 +516,8 @@ void __init s3c64xx_clk_init(struct device_node *np, unsigned long xtal_f,
 	samsung_clk_register_alias(ctx, s3c64xx_clock_aliases,
 					ARRAY_SIZE(s3c64xx_clock_aliases));
 	s3c64xx_clk_sleep_init();
+
+	samsung_clk_of_add_provider(np, ctx);
 
 	pr_info("%s clocks: apll = %lu, mpll = %lu\n"
 		"\tepll = %lu, arm_clk = %lu\n",

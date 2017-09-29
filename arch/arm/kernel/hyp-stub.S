@@ -17,6 +17,7 @@
  */
 
 #include <linux/init.h>
+#include <linux/irqchip/arm-gic-v3.h>
 #include <linux/linkage.h>
 #include <asm/assembler.h>
 #include <asm/virt.h>
@@ -99,7 +100,7 @@ ENTRY(__hyp_stub_install_secondary)
 	 * immediately.
 	 */
 	compare_cpu_mode_with_primary	r4, r5, r6, r7
-	movne	pc, lr
+	retne	lr
 
 	/*
 	 * Once we have given up on one CPU, we do not try to install the
@@ -111,7 +112,7 @@ ENTRY(__hyp_stub_install_secondary)
 	 */
 
 	cmp	r4, #HYP_MODE
-	movne	pc, lr			@ give up if the CPU is not in HYP mode
+	retne	lr			@ give up if the CPU is not in HYP mode
 
 /*
  * Configure HSCTLR to set correct exception endianness/instruction set
@@ -134,9 +135,7 @@ ENTRY(__hyp_stub_install_secondary)
 	mcr	p15, 4, r7, c1, c1, 3	@ HSTR
 
 THUMB(	orr	r7, #(1 << 30)	)	@ HSCTLR.TE
-#ifdef CONFIG_CPU_BIG_ENDIAN
-	orr	r7, #(1 << 9)		@ HSCTLR.EE
-#endif
+ARM_BE8(orr	r7, r7, #(1 << 25))     @ HSCTLR.EE
 	mcr	p15, 4, r7, c1, c0, 0	@ HSCTLR
 
 	mrc	p15, 4, r7, c1, c1, 1	@ HDCR
@@ -161,6 +160,29 @@ THUMB(	orr	r7, #(1 << 30)	)	@ HSCTLR.TE
 	bic	r7, #1			@ Clear ENABLE
 	mcr	p15, 0, r7, c14, c3, 1	@ CNTV_CTL
 1:
+#endif
+
+#ifdef CONFIG_ARM_GIC_V3
+	@ Check whether GICv3 system registers are available
+	mrc	p15, 0, r7, c0, c1, 1	@ ID_PFR1
+	ubfx	r7, r7, #28, #4
+	cmp	r7, #1
+	bne	2f
+
+	@ Enable system register accesses
+	mrc	p15, 4, r7, c12, c9, 5	@ ICC_HSRE
+	orr	r7, r7, #(ICC_SRE_EL2_ENABLE | ICC_SRE_EL2_SRE)
+	mcr	p15, 4, r7, c12, c9, 5	@ ICC_HSRE
+	isb
+
+	@ SRE bit could be forced to 0 by firmware.
+	@ Check whether it sticks before accessing any other sysreg
+	mrc	p15, 4, r7, c12, c9, 5	@ ICC_HSRE
+	tst	r7, #ICC_SRE_EL2_SRE
+	beq	2f
+	mov	r7, #0
+	mcr	p15, 4, r7, c12, c11, 0	@ ICH_HCR
+2:
 #endif
 
 	bx	lr			@ The boot CPU mode is left in r4.
@@ -201,7 +223,7 @@ ENDPROC(__hyp_get_vectors)
 	@ fall through
 ENTRY(__hyp_set_vectors)
 	__HVC(0)
-	mov	pc, lr
+	ret	lr
 ENDPROC(__hyp_set_vectors)
 
 #ifndef ZIMAGE

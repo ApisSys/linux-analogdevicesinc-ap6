@@ -41,24 +41,25 @@
 #include <asm/div64.h>
 #include <linux/seq_file.h>
 
-#include <obd_support.h>
-#include <lustre/lustre_idl.h>
-#include <lustre_fid.h>
-#include <lustre_lib.h>
-#include <lustre_net.h>
-#include <lustre_dlm.h>
-#include <obd_class.h>
-#include <lprocfs_status.h>
+#include "../include/obd_support.h"
+#include "../include/lustre/lustre_idl.h"
+#include "../include/lustre_fid.h"
+#include "../include/lustre_lib.h"
+#include "../include/lustre_net.h"
+#include "../include/lustre_dlm.h"
+#include "../include/obd_class.h"
+#include "../include/lprocfs_status.h"
 #include "lmv_internal.h"
 
 int lmv_fld_lookup(struct lmv_obd *lmv,
 		   const struct lu_fid *fid,
-		   mdsno_t *mds)
+		   u32 *mds)
 {
 	int rc;
 
 	/* FIXME: Currently ZFS still use local seq for ROOT unfortunately, and
-	 * this fid_is_local check should be removed once LU-2240 is fixed */
+	 * this fid_is_local check should be removed once LU-2240 is fixed
+	 */
 	LASSERTF((fid_seq_in_fldb(fid_seq(fid)) ||
 		  fid_seq_is_local_file(fid_seq(fid))) &&
 		 fid_is_sane(fid), DFID" is insane!\n", PFID(fid));
@@ -66,8 +67,8 @@ int lmv_fld_lookup(struct lmv_obd *lmv,
 	rc = fld_client_lookup(&lmv->lmv_fld, fid_seq(fid), mds,
 			       LU_SEQ_RANGE_MDT, NULL);
 	if (rc) {
-		CERROR("Error while looking for mds number. Seq "LPX64
-		       ", err = %d\n", fid_seq(fid), rc);
+		CERROR("Error while looking for mds number. Seq %#llx, err = %d\n",
+		       fid_seq(fid), rc);
 		return rc;
 	}
 
@@ -75,8 +76,7 @@ int lmv_fld_lookup(struct lmv_obd *lmv,
 	       *mds, PFID(fid));
 
 	if (*mds >= lmv->desc.ld_tgt_count) {
-		CERROR("FLD lookup got invalid mds #%x (max: %x) "
-		       "for fid="DFID"\n", *mds, lmv->desc.ld_tgt_count,
+		CERROR("FLD lookup got invalid mds #%x (max: %x) for fid=" DFID "\n", *mds, lmv->desc.ld_tgt_count,
 		       PFID(fid));
 		rc = -EINVAL;
 	}
