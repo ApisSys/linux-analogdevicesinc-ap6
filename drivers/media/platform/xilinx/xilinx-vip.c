@@ -1,18 +1,24 @@
 /*
  * Xilinx Video IP Core
  *
- * Copyright (C) 2013 Ideas on Board SPRL
+ * Copyright (C) 2013-2015 Ideas on Board
+ * Copyright (C) 2013-2015 Xilinx, Inc.
  *
- * Contacts: Laurent Pinchart <laurent.pinchart@ideasonboard.com>
+ * Contacts: Hyun Kwon <hyun.kwon@xilinx.com>
+ *           Laurent Pinchart <laurent.pinchart@ideasonboard.com>
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 as
  * published by the Free Software Foundation.
  */
 
+#include <linux/clk.h>
 #include <linux/export.h>
 #include <linux/kernel.h>
 #include <linux/of.h>
+#include <linux/platform_device.h>
+
+#include <dt-bindings/media/xilinx-vip.h>
 
 #include "xilinx-vip.h"
 
@@ -21,21 +27,22 @@
  */
 
 static const struct xvip_video_format xvip_video_formats[] = {
-	{ "rbg", 8, 3, V4L2_MBUS_FMT_RBG888_1X24, 0, NULL },
-	{ "xrgb", 8, 4, V4L2_MBUS_FMT_RGB888_1X32_PADHI, V4L2_PIX_FMT_BGR32,
-	  "RGB32 (BE)" },
-	{ "yuv422", 8, 2, V4L2_MBUS_FMT_UYVY8_1X16, V4L2_PIX_FMT_YUYV,
-	  "4:2:2, packed, YUYV" },
-	{ "yuv444", 8, 3, V4L2_MBUS_FMT_VUY8_1X24, V4L2_PIX_FMT_YUV444,
-	  "4:4:4, packed, YUYV" },
-	{ "rggb", 8, 1, V4L2_MBUS_FMT_SRGGB8_1X8, V4L2_PIX_FMT_SGRBG8,
-	  "Bayer 8-bit RGGB" },
-	{ "grbg", 8, 1, V4L2_MBUS_FMT_SGRBG8_1X8, V4L2_PIX_FMT_SGRBG8,
-	  "Bayer 8-bit GRBG" },
-	{ "gbrg", 8, 1, V4L2_MBUS_FMT_SGBRG8_1X8, V4L2_PIX_FMT_SGBRG8,
-	  "Bayer 8-bit GBRG" },
-	{ "bggr", 8, 1, V4L2_MBUS_FMT_SBGGR8_1X8, V4L2_PIX_FMT_SBGGR8,
-	  "Bayer 8-bit BGGR" },
+	{ XVIP_VF_YUV_422, 8, NULL, MEDIA_BUS_FMT_UYVY8_1X16,
+	  2, V4L2_PIX_FMT_YUYV, "4:2:2, packed, YUYV" },
+	{ XVIP_VF_YUV_444, 8, NULL, MEDIA_BUS_FMT_VUY8_1X24,
+	  3, V4L2_PIX_FMT_YUV444, "4:4:4, packed, YUYV" },
+	{ XVIP_VF_RBG, 8, NULL, MEDIA_BUS_FMT_RBG888_1X24,
+	  3, V4L2_PIX_FMT_RGB24, "24-bit RGB" },
+	{ XVIP_VF_MONO_SENSOR, 8, "mono", MEDIA_BUS_FMT_Y8_1X8,
+	  1, V4L2_PIX_FMT_GREY, "Greyscale 8-bit" },
+	{ XVIP_VF_MONO_SENSOR, 8, "rggb", MEDIA_BUS_FMT_SRGGB8_1X8,
+	  1, V4L2_PIX_FMT_SGRBG8, "Bayer 8-bit RGGB" },
+	{ XVIP_VF_MONO_SENSOR, 8, "grbg", MEDIA_BUS_FMT_SGRBG8_1X8,
+	  1, V4L2_PIX_FMT_SGRBG8, "Bayer 8-bit GRBG" },
+	{ XVIP_VF_MONO_SENSOR, 8, "gbrg", MEDIA_BUS_FMT_SGBRG8_1X8,
+	  1, V4L2_PIX_FMT_SGBRG8, "Bayer 8-bit GBRG" },
+	{ XVIP_VF_MONO_SENSOR, 8, "bggr", MEDIA_BUS_FMT_SBGGR8_1X8,
+	  1, V4L2_PIX_FMT_SBGGR8, "Bayer 8-bit BGGR" },
 };
 
 /**
@@ -88,33 +95,43 @@ EXPORT_SYMBOL_GPL(xvip_get_format_by_fourcc);
  * xvip_of_get_format - Parse a device tree node and return format information
  * @node: the device tree node
  *
- * Read the xlnx,axi-video-format and xlnx,axi-video-width properties from the
- * device tree @node passed as an argument and return the corresponding format
- * information.
+ * Read the xlnx,video-format, xlnx,video-width and xlnx,cfa-pattern properties
+ * from the device tree @node passed as an argument and return the corresponding
+ * format information.
  *
  * Return: a pointer to the format information structure corresponding to the
  * format name and width, or ERR_PTR if no corresponding format can be found.
  */
 const struct xvip_video_format *xvip_of_get_format(struct device_node *node)
 {
-	const char *name;
+	const char *pattern = "mono";
+	unsigned int vf_code;
 	unsigned int i;
 	u32 width;
 	int ret;
 
-	ret = of_property_read_string(node, "xlnx,axi-video-format", &name);
+	ret = of_property_read_u32(node, "xlnx,video-format", &vf_code);
 	if (ret < 0)
 		return ERR_PTR(ret);
 
-	ret = of_property_read_u32(node, "xlnx,axi-video-width", &width);
+	ret = of_property_read_u32(node, "xlnx,video-width", &width);
 	if (ret < 0)
 		return ERR_PTR(ret);
+
+	if (vf_code == XVIP_VF_MONO_SENSOR)
+		of_property_read_string(node, "xlnx,cfa-pattern", &pattern);
 
 	for (i = 0; i < ARRAY_SIZE(xvip_video_formats); ++i) {
 		const struct xvip_video_format *format = &xvip_video_formats[i];
 
-		if (strcmp(format->name, name) == 0 && format->width == width)
-			return format;
+		if (format->vf_code != vf_code || format->width != width)
+			continue;
+
+		if (vf_code == XVIP_VF_MONO_SENSOR &&
+		    strcmp(pattern, format->pattern))
+			continue;
+
+		return format;
 	}
 
 	return ERR_PTR(-EINVAL);
@@ -188,14 +205,39 @@ void xvip_clr_and_set(struct xvip_device *xvip, u32 addr, u32 clr, u32 set)
 }
 EXPORT_SYMBOL_GPL(xvip_clr_and_set);
 
+int xvip_init_resources(struct xvip_device *xvip)
+{
+	struct platform_device *pdev = to_platform_device(xvip->dev);
+	struct resource *res;
+
+	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
+	xvip->iomem = devm_ioremap_resource(xvip->dev, res);
+	if (IS_ERR(xvip->iomem))
+		return PTR_ERR(xvip->iomem);
+
+	xvip->clk = devm_clk_get(xvip->dev, NULL);
+	if (IS_ERR(xvip->clk))
+		return PTR_ERR(xvip->clk);
+
+	clk_prepare_enable(xvip->clk);
+	return 0;
+}
+EXPORT_SYMBOL_GPL(xvip_init_resources);
+
+void xvip_cleanup_resources(struct xvip_device *xvip)
+{
+	clk_disable_unprepare(xvip->clk);
+}
+EXPORT_SYMBOL_GPL(xvip_cleanup_resources);
+
 /* -----------------------------------------------------------------------------
- * Subdev operation helpers
+ * Subdev operations handlers
  */
 
 /**
  * xvip_enum_mbus_code - Enumerate the media format code
  * @subdev: V4L2 subdevice
- * @fh: V4L2 subdevice file handle
+ * @cfg: V4L2 subdev pad configuration
  * @code: returning media bus code
  *
  * Enumerate the media bus code of the subdevice. Return the corresponding
@@ -206,15 +248,22 @@ EXPORT_SYMBOL_GPL(xvip_clr_and_set);
  * Return: 0 if the media bus code is found, or -EINVAL if the format index
  * is not valid.
  */
-int xvip_enum_mbus_code(struct v4l2_subdev *subdev, struct v4l2_subdev_fh *fh,
+int xvip_enum_mbus_code(struct v4l2_subdev *subdev,
+			struct v4l2_subdev_pad_config *cfg,
 			struct v4l2_subdev_mbus_code_enum *code)
 {
 	struct v4l2_mbus_framefmt *format;
 
+	/* Enumerating frame sizes based on the active configuration isn't
+	 * supported yet.
+	 */
+	if (code->which == V4L2_SUBDEV_FORMAT_ACTIVE)
+		return -EINVAL;
+
 	if (code->index)
 		return -EINVAL;
 
-	format = v4l2_subdev_get_try_format(fh, code->pad);
+	format = v4l2_subdev_get_try_format(subdev, cfg, code->pad);
 
 	code->code = format->code;
 
@@ -225,7 +274,7 @@ EXPORT_SYMBOL_GPL(xvip_enum_mbus_code);
 /**
  * xvip_enum_frame_size - Enumerate the media bus frame size
  * @subdev: V4L2 subdevice
- * @fh: V4L2 subdevice file handle
+ * @cfg: V4L2 subdev pad configuration
  * @fse: returning media bus frame size
  *
  * This function is a drop-in implementation of the subdev enum_frame_size pad
@@ -237,12 +286,19 @@ EXPORT_SYMBOL_GPL(xvip_enum_mbus_code);
  * Return: 0 if the media bus frame size is found, or -EINVAL
  * if the index or the code is not valid.
  */
-int xvip_enum_frame_size(struct v4l2_subdev *subdev, struct v4l2_subdev_fh *fh,
+int xvip_enum_frame_size(struct v4l2_subdev *subdev,
+			 struct v4l2_subdev_pad_config *cfg,
 			 struct v4l2_subdev_frame_size_enum *fse)
 {
 	struct v4l2_mbus_framefmt *format;
 
-	format = v4l2_subdev_get_try_format(fh, fse->pad);
+	/* Enumerating frame sizes based on the active configuration isn't
+	 * supported yet.
+	 */
+	if (fse->which == V4L2_SUBDEV_FORMAT_ACTIVE)
+		return -EINVAL;
+
+	format = v4l2_subdev_get_try_format(subdev, cfg, fse->pad);
 
 	if (fse->index || fse->code != format->code)
 		return -EINVAL;

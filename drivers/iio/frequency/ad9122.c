@@ -23,7 +23,11 @@
 #include "ad9122.h"
 #include "cf_axi_dds.h"
 
-static const char clk_names[CLK_NUM][10] = {"data_clk", "dac_clk", "ref_clk"};
+static const char * const clk_names[] = {
+	[CLK_DATA] = "data_clk",
+	[CLK_DAC] = "dac_clk",
+	[CLK_REF] = "ref_clk"
+};
 
 static const unsigned char ad9122_reg_defaults[][2] = {
 	{AD9122_REG_COMM, 0x00},
@@ -318,6 +322,7 @@ static int ad9122_sync(struct cf_axi_converter *conv)
 	ad9122_write(spi, AD9122_REG_FIFO_STATUS_1, 0x0);
 	ad9122_write(spi, AD9122_REG_SYNC_CTRL_1,
 		     AD9122_SYNC_CTRL_1_SYNC_EN |
+		     AD9122_SYNC_CTRL_1_DATA_FIFO_RATE_TOGGLE |
 		     AD9122_SYNC_CTRL_1_RISING_EDGE_SYNC);
 
 	timeout = 255;
@@ -337,9 +342,14 @@ static int ad9122_setup(struct cf_axi_converter *conv, unsigned mode)
 	struct spi_device *spi = conv->spi;
 	int i;
 
-	for (i = 0; i < ARRAY_SIZE(ad9122_reg_defaults); i++)
-			ad9122_write(spi, ad9122_reg_defaults[i][0],
-					     ad9122_reg_defaults[i][1]);
+	for (i = 0; i < ARRAY_SIZE(ad9122_reg_defaults); i++) {
+		unsigned char reg = ad9122_reg_defaults[i][0],
+			      value = ad9122_reg_defaults[i][1];
+
+		if (reg == AD9122_REG_COMM)
+			value |= mode;
+		ad9122_write(spi, reg, value);
+	}
 
 	return ad9122_sync(conv);
 }
@@ -351,7 +361,7 @@ static int ad9122_get_clks(struct cf_axi_converter *conv)
 	int i, ret;
 
 	for (i = 0; i < CLK_NUM; i++) {
-		clk = clk_get(&conv->spi->dev, &clk_names[i][0]);
+		clk = clk_get(&conv->spi->dev, clk_names[i]);
 		if (IS_ERR(clk)) {
 			return -EPROBE_DEFER;
 		}
@@ -365,7 +375,7 @@ static int ad9122_get_clks(struct cf_axi_converter *conv)
 	return 0;
 }
 
-static unsigned long ad9122_get_data_clk(struct cf_axi_converter *conv)
+static unsigned long long ad9122_get_data_clk(struct cf_axi_converter *conv)
 {
 	return clk_get_rate(conv->clk[CLK_DATA]);
 }
@@ -441,6 +451,8 @@ static int ad9122_set_data_clk(struct cf_axi_converter *conv, unsigned long freq
 	}
 
 	r_ref_freq = clk_round_rate(conv->clk[CLK_REF], dat_freq / 8);
+	dev_dbg(&conv->spi->dev, "CLK REF rate: %li\n", r_ref_freq);
+
 	if (r_ref_freq != (dat_freq / 8)) {
 		dev_err(&conv->spi->dev,
 			"CLK_REF: Requested Rate exceeds mismatch %ld (%lu)",
@@ -563,7 +575,7 @@ static int ad9122_set_interpol_fcent_freq(struct cf_axi_converter *conv,
 {
 
 	return __ad9122_set_interpol(conv, conv->interp_factor,
-		(freq * 2) / ad9122_get_data_clk(conv), 0);
+		(freq * 2) / (u32) ad9122_get_data_clk(conv), 0);
 }
 
 static unsigned long ad9122_get_interpol_freq(struct cf_axi_converter *conv)
@@ -888,16 +900,20 @@ static int ad9122_probe(struct spi_device *spi)
 	struct device_node *np = spi->dev.of_node;
 	struct cf_axi_converter *conv;
 	unsigned id, rate, datapath_ctrl, tmp;
-	int ret;
+	int ret, conf;
+	bool spi3wire = of_property_read_bool(
+			spi->dev.of_node, "adi,spi-3wire-enable");
 
 	conv = devm_kzalloc(&spi->dev, sizeof(*conv), GFP_KERNEL);
 	if (conv == NULL)
 		return -ENOMEM;
 
-	conv->reset_gpio = devm_gpiod_get(&spi->dev, "reset");
-	if (!IS_ERR(conv->reset_gpio)) {
-		ret = gpiod_direction_output(conv->reset_gpio, 1);
-	}
+	conv->reset_gpio = devm_gpiod_get(&spi->dev, "reset", GPIOD_OUT_HIGH);
+
+	conf = (spi->mode & SPI_3WIRE || spi3wire) ? AD9122_COMM_SDIO : 0;
+	ret = ad9122_write(spi, AD9122_REG_COMM, conf | AD9122_COMM_RESET);
+	if (ret < 0)
+		return ret;
 
 	id = ad9122_read(spi, AD9122_REG_CHIP_ID);
 	if (id != CHIPID_AD9122) {
@@ -923,7 +939,7 @@ static int ad9122_probe(struct spi_device *spi)
 		goto out;
 	}
 
-	ret = ad9122_setup(conv, 0);
+	ret = ad9122_setup(conv, conf);
 	if (ret < 0) {
 		dev_err(&spi->dev, "Failed to setup device\n");
 		goto out;
@@ -961,12 +977,6 @@ out:
 	return ret;
 }
 
-static int ad9122_remove(struct spi_device *spi)
-{
-	spi_set_drvdata(spi, NULL);
-	return 0;
-}
-
 static const struct spi_device_id ad9122_id[] = {
 	{"ad9122", 0},
 	{}
@@ -979,7 +989,6 @@ static struct spi_driver ad9122_driver = {
 		.owner	= THIS_MODULE,
 	},
 	.probe		= ad9122_probe,
-	.remove		= ad9122_remove,
 	.id_table	= ad9122_id,
 };
 module_spi_driver(ad9122_driver);

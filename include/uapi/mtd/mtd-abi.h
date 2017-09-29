@@ -109,6 +109,7 @@ struct mtd_write_req {
 #define MTD_CAP_RAM		(MTD_WRITEABLE | MTD_BIT_WRITEABLE | MTD_NO_ERASE)
 #define MTD_CAP_NORFLASH	(MTD_WRITEABLE | MTD_BIT_WRITEABLE)
 #define MTD_CAP_NANDFLASH	(MTD_WRITEABLE)
+#define MTD_CAP_NVRAM		(MTD_WRITEABLE | MTD_BIT_WRITEABLE | MTD_NO_ERASE)
 
 /* Obsolete ECC byte placement modes (used with obsolete MEMGETOOBSEL) */
 #define MTD_NANDECC_OFF		0	// Switch off ECC (Not recommended)
@@ -227,7 +228,7 @@ struct nand_oobfree {
  * complete set of ECC information. The ioctl truncates the larger internal
  * structure to retain binary compatibility with the static declaration of the
  * ioctl. Note that the "MTD_MAX_..._ENTRIES" macros represent the max size of
- * the user struct, not the MAX size of the internal struct nand_ecclayout.
+ * the user struct, not the MAX size of the internal OOB layout representation.
  */
 struct nand_ecclayout_user {
 	__u32 eccbytes;
@@ -251,7 +252,7 @@ struct mtd_ecc_stats {
 	__u32 bbtblocks;
 };
 
-/**
+/*
  * MTD file modes - for read/write access to MTD
  *
  * @MTD_FILE_MODE_NORMAL:	OTP disabled, ECC enabled
@@ -275,7 +276,7 @@ enum mtd_file_modes {
 	MTD_FILE_MODE_RAW,
 };
 
-/**
+/*
  * MTD locking states - return codes for ioctl(MEMISLOCKED)
  *
  * @MTD_IS_UNLOCKED:		Specified region is completely unlocked

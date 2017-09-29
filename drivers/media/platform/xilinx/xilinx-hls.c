@@ -1,9 +1,11 @@
 /*
  * Xilinx HLS Core
  *
- * Copyright (C) 2013-2014 Ideas on Board SPRL
+ * Copyright (C) 2013-2015 Ideas on Board
+ * Copyright (C) 2013-2015 Xilinx, Inc.
  *
- * Contacts: Laurent Pinchart <laurent.pinchart@ideasonboard.com>
+ * Contacts: Hyun Kwon <hyun.kwon@xilinx.com>
+ *           Laurent Pinchart <laurent.pinchart@ideasonboard.com>
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 as
@@ -21,25 +23,8 @@
 #include <media/v4l2-ctrls.h>
 #include <media/v4l2-subdev.h>
 
+#include "xilinx-hls-common.h"
 #include "xilinx-vip.h"
-
-#define XHLS_DEF_WIDTH				1920
-#define XHLS_DEF_HEIGHT				1080
-
-#define XHLS_REG_CTRL_DONE			(1 << 1)
-#define XHLS_REG_CTRL_IDLE			(1 << 2)
-#define XHLS_REG_CTRL_READY			(1 << 3)
-#define XHLS_REG_CTRL_AUTO_RESTART		(1 << 7)
-#define XHLS_REG_GIE				0x04
-#define XHLS_REG_GIE_GIE			(1 << 0)
-#define XHLS_REG_IER				0x08
-#define XHLS_REG_IER_DONE			(1 << 0)
-#define XHLS_REG_IER_READY			(1 << 1)
-#define XHLS_REG_ISR				0x0c
-#define XHLS_REG_ISR_DONE			(1 << 0)
-#define XHLS_REG_ISR_READY			(1 << 1)
-#define XHLS_REG_ROWS				0x14
-#define XHLS_REG_COLS				0x1c
 
 /**
  * struct xhls_device - Xilinx HLS Core device structure
@@ -49,6 +34,7 @@
  * @formats: active V4L2 media bus formats at the sink and source pads
  * @default_formats: default V4L2 media bus formats
  * @vip_formats: format information corresponding to the pads active formats
+ * @model: additional description of IP implementation if available
  * @ctrl_handler: control handler
  * @user_mem: user portion of the register space
  * @user_mem_size: size of the user portion of the register space
@@ -104,7 +90,7 @@ static int xhls_create_controls(struct xhls_device *xhls)
 		return xhls->ctrl_handler.error;
 	}
 
-	strlcpy(ctrl->cur.string, xhls->compatible, model.max + 1);
+	v4l2_ctrl_s_ctrl_string(ctrl, xhls->compatible);
 
 	xhls->xvip.subdev.ctrl_handler = &xhls->ctrl_handler;
 
@@ -206,12 +192,13 @@ static int xhls_s_stream(struct v4l2_subdev *subdev, int enable)
  */
 
 static struct v4l2_mbus_framefmt *
-__xhls_get_pad_format(struct xhls_device *xhls, struct v4l2_subdev_fh *fh,
+__xhls_get_pad_format(struct xhls_device *xhls,
+		      struct v4l2_subdev_pad_config *cfg,
 		      unsigned int pad, u32 which)
 {
 	switch (which) {
 	case V4L2_SUBDEV_FORMAT_TRY:
-		return v4l2_subdev_get_try_format(fh, pad);
+		return v4l2_subdev_get_try_format(&xhls->xvip.subdev, cfg, pad);
 	case V4L2_SUBDEV_FORMAT_ACTIVE:
 		return &xhls->formats[pad];
 	default:
@@ -220,38 +207,39 @@ __xhls_get_pad_format(struct xhls_device *xhls, struct v4l2_subdev_fh *fh,
 }
 
 static int xhls_get_format(struct v4l2_subdev *subdev,
-			   struct v4l2_subdev_fh *fh,
+			   struct v4l2_subdev_pad_config *cfg,
 			   struct v4l2_subdev_format *fmt)
 {
 	struct xhls_device *xhls = to_hls(subdev);
 
-	fmt->format = *__xhls_get_pad_format(xhls, fh, fmt->pad, fmt->which);
+	fmt->format = *__xhls_get_pad_format(xhls, cfg, fmt->pad, fmt->which);
 
 	return 0;
 }
 
 static int xhls_set_format(struct v4l2_subdev *subdev,
-			   struct v4l2_subdev_fh *fh,
+			   struct v4l2_subdev_pad_config *cfg,
 			   struct v4l2_subdev_format *fmt)
 {
 	struct xhls_device *xhls = to_hls(subdev);
-	struct v4l2_mbus_framefmt *__format;
+	struct v4l2_mbus_framefmt *format;
 
-	__format = __xhls_get_pad_format(xhls, fh, fmt->pad, fmt->which);
+	format = __xhls_get_pad_format(xhls, cfg, fmt->pad, fmt->which);
 
 	if (fmt->pad == XVIP_PAD_SOURCE) {
-		fmt->format = *__format;
+		fmt->format = *format;
 		return 0;
 	}
 
-	xvip_set_format_size(__format, fmt);
+	xvip_set_format_size(format, fmt);
 
-	fmt->format = *__format;
+	fmt->format = *format;
 
 	/* Propagate the format to the source pad. */
-	__format = __xhls_get_pad_format(xhls, fh, XVIP_PAD_SOURCE, fmt->which);
+	format = __xhls_get_pad_format(xhls, cfg, XVIP_PAD_SOURCE,
+					 fmt->which);
 
-	xvip_set_format_size(__format, fmt);
+	xvip_set_format_size(format, fmt);
 
 	return 0;
 }
@@ -266,10 +254,10 @@ static int xhls_open(struct v4l2_subdev *subdev, struct v4l2_subdev_fh *fh)
 	struct v4l2_mbus_framefmt *format;
 
 	/* Initialize with default formats */
-	format = v4l2_subdev_get_try_format(fh, XVIP_PAD_SINK);
+	format = v4l2_subdev_get_try_format(subdev, fh->pad, XVIP_PAD_SINK);
 	*format = xhls->default_formats[XVIP_PAD_SINK];
 
-	format = v4l2_subdev_get_try_format(fh, XVIP_PAD_SOURCE);
+	format = v4l2_subdev_get_try_format(subdev, fh->pad, XVIP_PAD_SOURCE);
 	*format = xhls->default_formats[XVIP_PAD_SOURCE];
 
 	return 0;
@@ -403,10 +391,9 @@ static int xhls_probe(struct platform_device *pdev)
 	if (ret < 0)
 		return ret;
 
-	mem = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-	xhls->xvip.iomem = devm_ioremap_resource(&pdev->dev, mem);
-	if (IS_ERR(xhls->xvip.iomem))
-		return PTR_ERR(xhls->xvip.iomem);
+	ret = xvip_init_resources(&xhls->xvip);
+	if (ret < 0)
+		return ret;
 
 	mem = platform_get_resource(pdev, IORESOURCE_MEM, 1);
 	xhls->user_mem = devm_ioremap_resource(&pdev->dev, mem);
@@ -431,9 +418,9 @@ static int xhls_probe(struct platform_device *pdev)
 	xhls->pads[XVIP_PAD_SINK].flags = MEDIA_PAD_FL_SINK;
 	xhls->pads[XVIP_PAD_SOURCE].flags = MEDIA_PAD_FL_SOURCE;
 	subdev->entity.ops = &xhls_media_ops;
-	ret = media_entity_init(&subdev->entity, 2, xhls->pads, 0);
+	ret = media_entity_pads_init(&subdev->entity, 2, xhls->pads);
 	if (ret < 0)
-		return ret;
+		goto error;
 
 	ret = xhls_create_controls(xhls);
 	if (ret < 0)
@@ -454,6 +441,7 @@ static int xhls_probe(struct platform_device *pdev)
 error:
 	v4l2_ctrl_handler_free(&xhls->ctrl_handler);
 	media_entity_cleanup(&subdev->entity);
+	xvip_cleanup_resources(&xhls->xvip);
 	return ret;
 }
 
@@ -466,18 +454,20 @@ static int xhls_remove(struct platform_device *pdev)
 	v4l2_ctrl_handler_free(&xhls->ctrl_handler);
 	media_entity_cleanup(&subdev->entity);
 
+	xvip_cleanup_resources(&xhls->xvip);
+
 	return 0;
 }
 
 static const struct of_device_id xhls_of_id_table[] = {
-	{ .compatible = "xlnx,axi-hls" },
+	{ .compatible = "xlnx,v-hls" },
 	{ }
 };
 MODULE_DEVICE_TABLE(of, xhls_of_id_table);
 
 static struct platform_driver xhls_driver = {
 	.driver = {
-		.name = "xilinx-axi-hls",
+		.name = "xilinx-hls",
 		.of_match_table = xhls_of_id_table,
 	},
 	.probe = xhls_probe,

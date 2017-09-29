@@ -417,7 +417,7 @@ static void kvm_map_magic_page(void *data)
 	ulong out[8];
 
 	in[0] = KVM_MAGIC_PAGE;
-	in[1] = KVM_MAGIC_PAGE;
+	in[1] = KVM_MAGIC_PAGE | MAGIC_PAGE_FLAG_NOT_MAPPED_NX;
 
 	epapr_hypercall(in, out, KVM_HCALL_TOKEN(KVM_HC_PPC_MAP_MAGIC_PAGE));
 
@@ -648,7 +648,6 @@ static void kvm_check_ins(u32 *inst, u32 features)
 			u32 inst_rb = _inst & KVM_MASK_RB;
 			kvm_patch_ins_mtsrin(inst, inst_rt, inst_rb);
 		}
-		break;
 		break;
 #endif
 	}

@@ -148,11 +148,11 @@ SND_SOC_DAPM_OUTPUT("AOUTR"),
 };
 
 static const struct snd_soc_dapm_route cs4270_dapm_routes[] = {
-	{ "Capture", NULL, "AINA" },
-	{ "Capture", NULL, "AINB" },
+	{ "Capture", NULL, "AINL" },
+	{ "Capture", NULL, "AINR" },
 
-	{ "AOUTA", NULL, "Playback" },
-	{ "AOUTB", NULL, "Playback" },
+	{ "AOUTL", NULL, "Playback" },
+	{ "AOUTR", NULL, "Playback" },
 };
 
 /**
@@ -438,7 +438,7 @@ static int cs4270_dai_mute(struct snd_soc_dai *dai, int mute)
 static int cs4270_soc_put_mute(struct snd_kcontrol *kcontrol,
 				struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_codec *codec = snd_kcontrol_chip(kcontrol);
+	struct snd_soc_codec *codec = snd_soc_kcontrol_codec(kcontrol);
 	struct cs4270_private *cs4270 = snd_soc_codec_get_drvdata(codec);
 	int left = !ucontrol->value.integer.value[0];
 	int right = !ucontrol->value.integer.value[1];
@@ -617,12 +617,14 @@ static const struct snd_soc_codec_driver soc_codec_device_cs4270 = {
 	.suspend =		cs4270_soc_suspend,
 	.resume =		cs4270_soc_resume,
 
-	.controls =		cs4270_snd_controls,
-	.num_controls =		ARRAY_SIZE(cs4270_snd_controls),
-	.dapm_widgets =		cs4270_dapm_widgets,
-	.num_dapm_widgets =	ARRAY_SIZE(cs4270_dapm_widgets),
-	.dapm_routes =		cs4270_dapm_routes,
-	.num_dapm_routes =	ARRAY_SIZE(cs4270_dapm_routes),
+	.component_driver = {
+		.controls =		cs4270_snd_controls,
+		.num_controls =		ARRAY_SIZE(cs4270_snd_controls),
+		.dapm_widgets =		cs4270_dapm_widgets,
+		.num_dapm_widgets =	ARRAY_SIZE(cs4270_dapm_widgets),
+		.dapm_routes =		cs4270_dapm_routes,
+		.num_dapm_routes =	ARRAY_SIZE(cs4270_dapm_routes),
+	},
 };
 
 /*
@@ -664,10 +666,8 @@ static int cs4270_i2c_probe(struct i2c_client *i2c_client,
 
 	cs4270 = devm_kzalloc(&i2c_client->dev, sizeof(struct cs4270_private),
 			      GFP_KERNEL);
-	if (!cs4270) {
-		dev_err(&i2c_client->dev, "could not allocate codec\n");
+	if (!cs4270)
 		return -ENOMEM;
-	}
 
 	/* get the power supply regulators */
 	for (i = 0; i < ARRAY_SIZE(supply_names); i++)
@@ -753,7 +753,6 @@ MODULE_DEVICE_TABLE(i2c, cs4270_id);
 static struct i2c_driver cs4270_i2c_driver = {
 	.driver = {
 		.name = "cs4270",
-		.owner = THIS_MODULE,
 		.of_match_table = cs4270_of_match,
 	},
 	.id_table = cs4270_id,

@@ -1,11 +1,16 @@
-#include "misc.h"
+/*
+ * This provides an optimized implementation of memcpy, and a simplified
+ * implementation of memset and memmove. These are used here because the
+ * standard kernel runtime versions are not yet available and we don't
+ * trust the gcc built-in implementations as they may do unexpected things
+ * (e.g. FPU ops) in the minimal decompression stub execution environment.
+ */
+#include "error.h"
+
 #include "../string.c"
 
-/* misc.h might pull in string_32.h which has a macro for memcpy. undef that */
-#undef memcpy
-
 #ifdef CONFIG_X86_32
-void *memcpy(void *dest, const void *src, size_t n)
+static void *__memcpy(void *dest, const void *src, size_t n)
 {
 	int d0, d1, d2;
 	asm volatile(
@@ -19,7 +24,7 @@ void *memcpy(void *dest, const void *src, size_t n)
 	return dest;
 }
 #else
-void *memcpy(void *dest, const void *src, size_t n)
+static void *__memcpy(void *dest, const void *src, size_t n)
 {
 	long d0, d1, d2;
 	asm volatile(
@@ -42,4 +47,28 @@ void *memset(void *s, int c, size_t n)
 	for (i = 0; i < n; i++)
 		ss[i] = c;
 	return s;
+}
+
+void *memmove(void *dest, const void *src, size_t n)
+{
+	unsigned char *d = dest;
+	const unsigned char *s = src;
+
+	if (d <= s || d - s >= n)
+		return __memcpy(dest, src, n);
+
+	while (n-- > 0)
+		d[n] = s[n];
+
+	return dest;
+}
+
+/* Detect and warn about potential overlaps, but handle them with memmove. */
+void *memcpy(void *dest, const void *src, size_t n)
+{
+	if (dest > src && dest - src < n) {
+		warn("Avoiding potentially unsafe overlapping memcpy()!");
+		return memmove(dest, src, n);
+	}
+	return __memcpy(dest, src, n);
 }

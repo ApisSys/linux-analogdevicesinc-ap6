@@ -39,6 +39,7 @@
 #include <asm/asm-offsets.h>
 #include <asm/ptrace.h>
 #include <asm/synch.h>
+#include <asm/export.h>
 #include "head_booke.h"
 
 
@@ -94,18 +95,6 @@ _ENTRY(_start);
 #endif
 
 	bl	init_cpu_state
-
-	/*
-	 * The following code is needed to make GDB work with soft breakpoints.
-	 * This patch was provided by Brian Hill. 
-	 */ 
-	lis     r2,DBCR0_IDM@h
-	mtspr   SPRN_DBCR0,r2
-	isync
-
-	/* clear any residual debug events */
-	li      r2,-1
-	mtspr   SPRN_DBSR,r2
 
 	/*
 	 * This is where the main kernel code starts.
@@ -818,7 +807,7 @@ _GLOBAL(set_context)
 _GLOBAL(init_cpu_state)
 	mflr	r22
 #ifdef CONFIG_PPC_47x
-	/* We use the PVR to differenciate 44x cores from 476 */
+	/* We use the PVR to differentiate 44x cores from 476 */
 	mfspr	r3,SPRN_PVR
 	srwi	r3,r3,16
 	cmplwi	cr0,r3,PVR_476FPE@h
@@ -944,21 +933,8 @@ skpinv:	addi	r4,r4,1				/* Increment */
 	tlbwe	r4,r0,PPC44x_TLB_XLAT	/* Load the translation fields */
 	tlbwe	r5,r0,PPC44x_TLB_ATTRIB	/* Load the attrib/access fields */
 
-
 	/* Force context change */
-#ifdef CONFIG_XILINX_VIRTEX_5_FXT
-	/* We can not use the content of the MSR register when we are using XMD
-	 * to connect to a ml5xx board as XMD changes the contents of the MSR
-	 * register. We load the default value instead. 
-	 *
-	 * EDK 10.1 fixes this issue so this should be removed once the automated 
-	 * testing is updated to 10.1 tools.
-	 */
-        lis     r0,MSR_KERNEL@h
-        ori     r0,r0,MSR_KERNEL@l
-#else
 	mfmsr	r0
-#endif
 	mtspr	SPRN_SRR1, r0
 	lis	r0,3f@h
 	ori	r0,r0,3f@l
@@ -1235,10 +1211,12 @@ clear_utlb_entry:
 
 	/* We configure icbi to invalidate 128 bytes at a time since the
 	 * current 32-bit kernel code isn't too happy with icache != dcache
-	 * block size
+	 * block size. We also disable the BTAC as this can cause errors
+	 * in some circumstances (see IBM Erratum 47).
 	 */
 	mfspr	r3,SPRN_CCR0
 	oris	r3,r3,0x0020
+	ori	r3,r3,0x0040
 	mtspr	SPRN_CCR0,r3
 	isync
 
@@ -1277,6 +1255,7 @@ sdata:
 	.globl	empty_zero_page
 empty_zero_page:
 	.space	PAGE_SIZE
+EXPORT_SYMBOL(empty_zero_page)
 
 /*
  * To support >32-bit physical addresses, we use an 8KB pgdir.

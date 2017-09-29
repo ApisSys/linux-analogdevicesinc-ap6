@@ -116,10 +116,16 @@ static int tcs3472_read_raw(struct iio_dev *indio_dev,
 
 	switch (mask) {
 	case IIO_CHAN_INFO_RAW:
-		ret = tcs3472_req_data(data);
-		if (ret < 0)
+		ret = iio_device_claim_direct_mode(indio_dev);
+		if (ret)
 			return ret;
+		ret = tcs3472_req_data(data);
+		if (ret < 0) {
+			iio_device_release_direct_mode(indio_dev);
+			return ret;
+		}
 		ret = i2c_smbus_read_word_data(data->client, chan->address);
+		iio_device_release_direct_mode(indio_dev);
 		if (ret < 0)
 			return ret;
 		*val = ret;
@@ -196,7 +202,7 @@ static irqreturn_t tcs3472_trigger_handler(int irq, void *p)
 	}
 
 	iio_push_to_buffers_with_timestamp(indio_dev, data->buffer,
-		iio_get_time_ns());
+		iio_get_time_ns(indio_dev));
 
 done:
 	iio_trigger_notify_done(indio_dev->trig);
@@ -357,7 +363,6 @@ static struct i2c_driver tcs3472_driver = {
 	.driver = {
 		.name	= TCS3472_DRV_NAME,
 		.pm	= &tcs3472_pm_ops,
-		.owner	= THIS_MODULE,
 	},
 	.probe		= tcs3472_probe,
 	.remove		= tcs3472_remove,

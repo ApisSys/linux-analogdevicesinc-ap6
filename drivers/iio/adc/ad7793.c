@@ -102,7 +102,7 @@
 #define AD7795_CH_AIN1M_AIN1M	8 /* AIN1(-) - AIN1(-) */
 
 /* ID Register Bit Designations (AD7793_REG_ID) */
-#define AD7785_ID		0xB
+#define AD7785_ID		0x3
 #define AD7792_ID		0xA
 #define AD7793_ID		0xB
 #define AD7794_ID		0xF
@@ -193,7 +193,8 @@ static struct ad7793_state *ad_sigma_delta_to_ad7793(struct ad_sigma_delta *sd)
 	return container_of(sd, struct ad7793_state, sd);
 }
 
-static int ad7793_set_channel(struct ad_sigma_delta *sd, unsigned int channel)
+static int ad7793_set_channel(struct ad_sigma_delta *sd, unsigned int slot,
+	unsigned int channel)
 {
 	struct ad7793_state *st = ad_sigma_delta_to_ad7793(sd);
 
@@ -323,7 +324,7 @@ static int ad7793_setup(struct iio_dev *indio_dev,
 	if (ret)
 		goto out;
 
-	ret = ad7793_set_channel(&st->sd, 0);
+	ret = ad7793_set_channel(&st->sd, 0, 0);
 	if (ret)
 		goto out;
 
@@ -383,13 +384,6 @@ static ssize_t ad7793_write_frequency(struct device *dev,
 	long lval;
 	int i, ret;
 
-	mutex_lock(&indio_dev->mlock);
-	if (iio_buffer_enabled(indio_dev)) {
-		mutex_unlock(&indio_dev->mlock);
-		return -EBUSY;
-	}
-	mutex_unlock(&indio_dev->mlock);
-
 	ret = kstrtol(buf, 10, &lval);
 	if (ret)
 		return ret;
@@ -397,20 +391,21 @@ static ssize_t ad7793_write_frequency(struct device *dev,
 	if (lval == 0)
 		return -EINVAL;
 
-	ret = -EINVAL;
-
 	for (i = 0; i < 16; i++)
-		if (lval == st->chip_info->sample_freq_avail[i]) {
-			mutex_lock(&indio_dev->mlock);
-			st->mode &= ~AD7793_MODE_RATE(-1);
-			st->mode |= AD7793_MODE_RATE(i);
-			ad_sd_write_reg(&st->sd, AD7793_REG_MODE,
-					 sizeof(st->mode), st->mode);
-			mutex_unlock(&indio_dev->mlock);
-			ret = 0;
-		}
+		if (lval == st->chip_info->sample_freq_avail[i])
+			break;
+	if (i == 16)
+		return -EINVAL;
 
-	return ret ? ret : len;
+	ret = iio_device_claim_direct_mode(indio_dev);
+	if (ret)
+		return ret;
+	st->mode &= ~AD7793_MODE_RATE(-1);
+	st->mode |= AD7793_MODE_RATE(i);
+	ad_sd_write_reg(&st->sd, AD7793_REG_MODE, sizeof(st->mode), st->mode);
+	iio_device_release_direct_mode(indio_dev);
+
+	return len;
 }
 
 static IIO_DEV_ATTR_SAMP_FREQ(S_IWUSR | S_IRUGO,
@@ -492,10 +487,9 @@ static int ad7793_read_raw(struct iio_dev *indio_dev,
 				*val2 = st->
 					scale_avail[(st->conf >> 8) & 0x7][1];
 				return IIO_VAL_INT_PLUS_NANO;
-			} else {
-				/* 1170mV / 2^23 * 6 */
-				scale_uv = (1170ULL * 1000000000ULL * 6ULL);
 			}
+			/* 1170mV / 2^23 * 6 */
+			scale_uv = (1170ULL * 1000000000ULL * 6ULL);
 			break;
 		case IIO_TEMP:
 				/* 1170mV / 0.81 mV/C / 2^23 */
@@ -540,11 +534,9 @@ static int ad7793_write_raw(struct iio_dev *indio_dev,
 	int ret, i;
 	unsigned int tmp;
 
-	mutex_lock(&indio_dev->mlock);
-	if (iio_buffer_enabled(indio_dev)) {
-		mutex_unlock(&indio_dev->mlock);
-		return -EBUSY;
-	}
+	ret = iio_device_claim_direct_mode(indio_dev);
+	if (ret)
+		return ret;
 
 	switch (mask) {
 	case IIO_CHAN_INFO_SCALE:
@@ -569,7 +561,7 @@ static int ad7793_write_raw(struct iio_dev *indio_dev,
 		ret = -EINVAL;
 	}
 
-	mutex_unlock(&indio_dev->mlock);
+	iio_device_release_direct_mode(indio_dev);
 	return ret;
 }
 
@@ -853,6 +845,7 @@ static int ad7793_probe(struct spi_device *spi)
 	spi_set_drvdata(spi, indio_dev);
 
 	indio_dev->dev.parent = &spi->dev;
+	indio_dev->dev.of_node = spi->dev.of_node;
 	indio_dev->name = spi_get_device_id(spi)->name;
 	indio_dev->modes = INDIO_DIRECT_MODE;
 	indio_dev->channels = st->chip_info->channels;
@@ -914,7 +907,6 @@ MODULE_DEVICE_TABLE(spi, ad7793_id);
 static struct spi_driver ad7793_driver = {
 	.driver = {
 		.name	= "ad7793",
-		.owner	= THIS_MODULE,
 	},
 	.probe		= ad7793_probe,
 	.remove		= ad7793_remove,
@@ -923,5 +915,5 @@ static struct spi_driver ad7793_driver = {
 module_spi_driver(ad7793_driver);
 
 MODULE_AUTHOR("Michael Hennerich <hennerich@blackfin.uclinux.org>");
-MODULE_DESCRIPTION("Analog Devices AD7793 and simialr ADCs");
+MODULE_DESCRIPTION("Analog Devices AD7793 and similar ADCs");
 MODULE_LICENSE("GPL v2");

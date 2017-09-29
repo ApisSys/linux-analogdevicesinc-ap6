@@ -14,6 +14,8 @@
 #include <linux/magic.h>
 #include <linux/slab.h>
 #include <linux/pagemap.h>
+#include <linux/namei.h>
+#include <linux/seq_file.h>
 
 #include "kernfs-internal.h"
 
@@ -39,6 +41,19 @@ static int kernfs_sop_show_options(struct seq_file *sf, struct dentry *dentry)
 	return 0;
 }
 
+static int kernfs_sop_show_path(struct seq_file *sf, struct dentry *dentry)
+{
+	struct kernfs_node *node = dentry->d_fsdata;
+	struct kernfs_root *root = kernfs_root(node);
+	struct kernfs_syscall_ops *scops = root->syscall_ops;
+
+	if (scops && scops->show_path)
+		return scops->show_path(sf, node, root);
+
+	seq_dentry(sf, dentry, " \t\n\\");
+	return 0;
+}
+
 const struct super_operations kernfs_sops = {
 	.statfs		= simple_statfs,
 	.drop_inode	= generic_delete_inode,
@@ -46,6 +61,7 @@ const struct super_operations kernfs_sops = {
 
 	.remount_fs	= kernfs_sop_remount_fs,
 	.show_options	= kernfs_sop_show_options,
+	.show_path	= kernfs_sop_show_path,
 };
 
 /**
@@ -62,16 +78,87 @@ struct kernfs_root *kernfs_root_from_sb(struct super_block *sb)
 	return NULL;
 }
 
+/*
+ * find the next ancestor in the path down to @child, where @parent was the
+ * ancestor whose descendant we want to find.
+ *
+ * Say the path is /a/b/c/d.  @child is d, @parent is NULL.  We return the root
+ * node.  If @parent is b, then we return the node for c.
+ * Passing in d as @parent is not ok.
+ */
+static struct kernfs_node *find_next_ancestor(struct kernfs_node *child,
+					      struct kernfs_node *parent)
+{
+	if (child == parent) {
+		pr_crit_once("BUG in find_next_ancestor: called with parent == child");
+		return NULL;
+	}
+
+	while (child->parent != parent) {
+		if (!child->parent)
+			return NULL;
+		child = child->parent;
+	}
+
+	return child;
+}
+
+/**
+ * kernfs_node_dentry - get a dentry for the given kernfs_node
+ * @kn: kernfs_node for which a dentry is needed
+ * @sb: the kernfs super_block
+ */
+struct dentry *kernfs_node_dentry(struct kernfs_node *kn,
+				  struct super_block *sb)
+{
+	struct dentry *dentry;
+	struct kernfs_node *knparent = NULL;
+
+	BUG_ON(sb->s_op != &kernfs_sops);
+
+	dentry = dget(sb->s_root);
+
+	/* Check if this is the root kernfs_node */
+	if (!kn->parent)
+		return dentry;
+
+	knparent = find_next_ancestor(kn, NULL);
+	if (WARN_ON(!knparent))
+		return ERR_PTR(-EINVAL);
+
+	do {
+		struct dentry *dtmp;
+		struct kernfs_node *kntmp;
+
+		if (kn == knparent)
+			return dentry;
+		kntmp = find_next_ancestor(kn, knparent);
+		if (WARN_ON(!kntmp))
+			return ERR_PTR(-EINVAL);
+		dtmp = lookup_one_len_unlocked(kntmp->name, dentry,
+					       strlen(kntmp->name));
+		dput(dentry);
+		if (IS_ERR(dtmp))
+			return dtmp;
+		knparent = kntmp;
+		dentry = dtmp;
+	} while (true);
+}
+
 static int kernfs_fill_super(struct super_block *sb, unsigned long magic)
 {
 	struct kernfs_super_info *info = kernfs_info(sb);
 	struct inode *inode;
 	struct dentry *root;
 
-	sb->s_blocksize = PAGE_CACHE_SIZE;
-	sb->s_blocksize_bits = PAGE_CACHE_SHIFT;
+	info->sb = sb;
+	/* Userspace would break if executables or devices appear on sysfs */
+	sb->s_iflags |= SB_I_NOEXEC | SB_I_NODEV;
+	sb->s_blocksize = PAGE_SIZE;
+	sb->s_blocksize_bits = PAGE_SHIFT;
 	sb->s_magic = magic;
 	sb->s_op = &kernfs_sops;
+	sb->s_xattr = kernfs_xattr_handlers;
 	sb->s_time_gran = 1;
 
 	/* get root inode, initialize and unlock it */
@@ -157,7 +244,8 @@ struct dentry *kernfs_mount_ns(struct file_system_type *fs_type, int flags,
 	info->root = root;
 	info->ns = ns;
 
-	sb = sget(fs_type, kernfs_test_super, kernfs_set_super, flags, info);
+	sb = sget_userns(fs_type, kernfs_test_super, kernfs_set_super, flags,
+			 &init_user_ns, info);
 	if (IS_ERR(sb) || sb->s_fs_info != info)
 		kfree(info);
 	if (IS_ERR(sb))
@@ -167,12 +255,18 @@ struct dentry *kernfs_mount_ns(struct file_system_type *fs_type, int flags,
 		*new_sb_created = !sb->s_root;
 
 	if (!sb->s_root) {
+		struct kernfs_super_info *info = kernfs_info(sb);
+
 		error = kernfs_fill_super(sb, magic);
 		if (error) {
 			deactivate_locked_super(sb);
 			return ERR_PTR(error);
 		}
 		sb->s_flags |= MS_ACTIVE;
+
+		mutex_lock(&kernfs_mutex);
+		list_add(&info->node, &root->supers);
+		mutex_unlock(&kernfs_mutex);
 	}
 
 	return dget(sb->s_root);
@@ -191,6 +285,10 @@ void kernfs_kill_sb(struct super_block *sb)
 	struct kernfs_super_info *info = kernfs_info(sb);
 	struct kernfs_node *root_kn = sb->s_root->d_fsdata;
 
+	mutex_lock(&kernfs_mutex);
+	list_del(&info->node);
+	mutex_unlock(&kernfs_mutex);
+
 	/*
 	 * Remove the superblock from fs_supers/s_instances
 	 * so we can't find it, before freeing kernfs_super_info.
@@ -200,10 +298,39 @@ void kernfs_kill_sb(struct super_block *sb)
 	kernfs_put(root_kn);
 }
 
+/**
+ * kernfs_pin_sb: try to pin the superblock associated with a kernfs_root
+ * @kernfs_root: the kernfs_root in question
+ * @ns: the namespace tag
+ *
+ * Pin the superblock so the superblock won't be destroyed in subsequent
+ * operations.  This can be used to block ->kill_sb() which may be useful
+ * for kernfs users which dynamically manage superblocks.
+ *
+ * Returns NULL if there's no superblock associated to this kernfs_root, or
+ * -EINVAL if the superblock is being freed.
+ */
+struct super_block *kernfs_pin_sb(struct kernfs_root *root, const void *ns)
+{
+	struct kernfs_super_info *info;
+	struct super_block *sb = NULL;
+
+	mutex_lock(&kernfs_mutex);
+	list_for_each_entry(info, &root->supers, node) {
+		if (info->ns == ns) {
+			sb = info->sb;
+			if (!atomic_inc_not_zero(&info->sb->s_active))
+				sb = ERR_PTR(-EINVAL);
+			break;
+		}
+	}
+	mutex_unlock(&kernfs_mutex);
+	return sb;
+}
+
 void __init kernfs_init(void)
 {
 	kernfs_node_cache = kmem_cache_create("kernfs_node_cache",
 					      sizeof(struct kernfs_node),
 					      0, SLAB_PANIC, NULL);
-	kernfs_inode_init();
 }

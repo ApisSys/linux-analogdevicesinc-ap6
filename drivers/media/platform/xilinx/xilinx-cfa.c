@@ -1,9 +1,11 @@
 /*
  * Xilinx Color Filter Array
  *
- * Copyright (C) 2013 - 2014 Xilinx, Inc.
+ * Copyright (C) 2013-2015 Ideas on Board
+ * Copyright (C) 2013-2015 Xilinx, Inc.
  *
- * Author: Hyun Woo Kwon <hyunk@xilinx.com>
+ * Contacts: Hyun Kwon <hyun.kwon@xilinx.com>
+ *           Laurent Pinchart <laurent.pinchart@ideasonboard.com>
  *
  * This software is licensed under the terms of the GNU General Public
  * License version 2, as published by the Free Software Foundation, and
@@ -61,13 +63,13 @@ static inline struct xcfa_device *to_cfa(struct v4l2_subdev *subdev)
 static int xcfa_get_bayer_phase(const unsigned int code)
 {
 	switch (code) {
-	case V4L2_MBUS_FMT_SRGGB8_1X8:
+	case MEDIA_BUS_FMT_SRGGB8_1X8:
 		return XCFA_BAYER_PHASE_RGGB;
-	case V4L2_MBUS_FMT_SGRBG8_1X8:
+	case MEDIA_BUS_FMT_SGRBG8_1X8:
 		return XCFA_BAYER_PHASE_GRBG;
-	case V4L2_MBUS_FMT_SGBRG8_1X8:
+	case MEDIA_BUS_FMT_SGBRG8_1X8:
 		return XCFA_BAYER_PHASE_GBRG;
-	case V4L2_MBUS_FMT_SBGGR8_1X8:
+	case MEDIA_BUS_FMT_SBGGR8_1X8:
 		return XCFA_BAYER_PHASE_BGGR;
 	}
 
@@ -103,12 +105,12 @@ static int xcfa_s_stream(struct v4l2_subdev *subdev, int enable)
 
 static struct v4l2_mbus_framefmt *
 __xcfa_get_pad_format(struct xcfa_device *xcfa,
-		      struct v4l2_subdev_fh *fh,
+		      struct v4l2_subdev_pad_config *cfg,
 		      unsigned int pad, u32 which)
 {
 	switch (which) {
 	case V4L2_SUBDEV_FORMAT_TRY:
-		return v4l2_subdev_get_try_format(fh, pad);
+		return v4l2_subdev_get_try_format(&xcfa->xvip.subdev, cfg, pad);
 	case V4L2_SUBDEV_FORMAT_ACTIVE:
 		return &xcfa->formats[pad];
 	default:
@@ -117,28 +119,28 @@ __xcfa_get_pad_format(struct xcfa_device *xcfa,
 }
 
 static int xcfa_get_format(struct v4l2_subdev *subdev,
-			   struct v4l2_subdev_fh *fh,
+			   struct v4l2_subdev_pad_config *cfg,
 			   struct v4l2_subdev_format *fmt)
 {
 	struct xcfa_device *xcfa = to_cfa(subdev);
 
-	fmt->format = *__xcfa_get_pad_format(xcfa, fh, fmt->pad, fmt->which);
+	fmt->format = *__xcfa_get_pad_format(xcfa, cfg, fmt->pad, fmt->which);
 
 	return 0;
 }
 
 static int xcfa_set_format(struct v4l2_subdev *subdev,
-			   struct v4l2_subdev_fh *fh,
+			   struct v4l2_subdev_pad_config *cfg,
 			   struct v4l2_subdev_format *fmt)
 {
 	struct xcfa_device *xcfa = to_cfa(subdev);
-	struct v4l2_mbus_framefmt *__format;
+	struct v4l2_mbus_framefmt *format;
 	int bayer_phase;
 
-	__format = __xcfa_get_pad_format(xcfa, fh, fmt->pad, fmt->which);
+	format = __xcfa_get_pad_format(xcfa, cfg, fmt->pad, fmt->which);
 
 	if (fmt->pad == XVIP_PAD_SOURCE) {
-		fmt->format = *__format;
+		fmt->format = *format;
 		return 0;
 	}
 
@@ -146,17 +148,17 @@ static int xcfa_set_format(struct v4l2_subdev *subdev,
 	if (bayer_phase >= 0) {
 		xcfa->vip_formats[XVIP_PAD_SINK] =
 			xvip_get_format_by_code(fmt->format.code);
-		__format->code = fmt->format.code;
+		format->code = fmt->format.code;
 	}
 
-	xvip_set_format_size(__format, fmt);
+	xvip_set_format_size(format, fmt);
 
-	fmt->format = *__format;
+	fmt->format = *format;
 
 	/* Propagate the format to the source pad */
-	__format = __xcfa_get_pad_format(xcfa, fh, XVIP_PAD_SOURCE, fmt->which);
+	format = __xcfa_get_pad_format(xcfa, cfg, XVIP_PAD_SOURCE, fmt->which);
 
-	xvip_set_format_size(__format, fmt);
+	xvip_set_format_size(format, fmt);
 
 	return 0;
 }
@@ -168,14 +170,14 @@ static int xcfa_set_format(struct v4l2_subdev *subdev,
 static int xcfa_open(struct v4l2_subdev *subdev, struct v4l2_subdev_fh *fh)
 {
 	struct xcfa_device *xcfa = to_cfa(subdev);
-	struct v4l2_mbus_framefmt *__format;
+	struct v4l2_mbus_framefmt *format;
 
 	/* Initialize with default formats */
-	__format = v4l2_subdev_get_try_format(fh, XVIP_PAD_SINK);
-	*__format = xcfa->default_formats[XVIP_PAD_SINK];
+	format = v4l2_subdev_get_try_format(subdev, fh->pad, XVIP_PAD_SINK);
+	*format = xcfa->default_formats[XVIP_PAD_SINK];
 
-	__format = v4l2_subdev_get_try_format(fh, XVIP_PAD_SOURCE);
-	*__format = xcfa->default_formats[XVIP_PAD_SOURCE];
+	format = v4l2_subdev_get_try_format(subdev, fh->pad, XVIP_PAD_SOURCE);
+	*format = xcfa->default_formats[XVIP_PAD_SOURCE];
 
 	return 0;
 }
@@ -285,7 +287,6 @@ static int xcfa_parse_of(struct xcfa_device *xcfa)
 static int xcfa_probe(struct platform_device *pdev)
 {
 	struct xcfa_device *xcfa;
-	struct resource *res;
 	struct v4l2_subdev *subdev;
 	struct v4l2_mbus_framefmt *default_format;
 	int ret;
@@ -300,10 +301,9 @@ static int xcfa_probe(struct platform_device *pdev)
 	if (ret < 0)
 		return ret;
 
-	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-	xcfa->xvip.iomem = devm_ioremap_resource(&pdev->dev, res);
-	if (IS_ERR(xcfa->xvip.iomem))
-		return PTR_ERR(xcfa->xvip.iomem);
+	ret = xvip_init_resources(&xcfa->xvip);
+	if (ret < 0)
+		return ret;
 
 	/* Reset and initialize the core */
 	xvip_reset(&xcfa->xvip);
@@ -335,9 +335,9 @@ static int xcfa_probe(struct platform_device *pdev)
 	xcfa->pads[XVIP_PAD_SINK].flags = MEDIA_PAD_FL_SINK;
 	xcfa->pads[XVIP_PAD_SOURCE].flags = MEDIA_PAD_FL_SOURCE;
 	subdev->entity.ops = &xcfa_media_ops;
-	ret = media_entity_init(&subdev->entity, 2, xcfa->pads, 0);
+	ret = media_entity_pads_init(&subdev->entity, 2, xcfa->pads);
 	if (ret < 0)
-		return ret;
+		goto error;
 
 	platform_set_drvdata(pdev, xcfa);
 
@@ -353,6 +353,7 @@ static int xcfa_probe(struct platform_device *pdev)
 
 error:
 	media_entity_cleanup(&subdev->entity);
+	xvip_cleanup_resources(&xcfa->xvip);
 	return ret;
 }
 
@@ -364,13 +365,15 @@ static int xcfa_remove(struct platform_device *pdev)
 	v4l2_async_unregister_subdev(subdev);
 	media_entity_cleanup(&subdev->entity);
 
+	xvip_cleanup_resources(&xcfa->xvip);
+
 	return 0;
 }
 
 static SIMPLE_DEV_PM_OPS(xcfa_pm_ops, xcfa_pm_suspend, xcfa_pm_resume);
 
 static const struct of_device_id xcfa_of_id_table[] = {
-	{ .compatible = "xlnx,axi-cfa-7.0" },
+	{ .compatible = "xlnx,v-cfa-7.0" },
 	{ }
 };
 MODULE_DEVICE_TABLE(of, xcfa_of_id_table);

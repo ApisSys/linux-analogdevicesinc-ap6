@@ -15,7 +15,7 @@
  */
 
 #include <linux/io.h>
-#include <linux/module.h>
+#include <linux/reboot.h>
 #include <linux/mfd/syscon.h>
 #include <linux/of_address.h>
 #include <linux/regmap.h>
@@ -24,20 +24,24 @@
 
 /* register offsets */
 #define SLCR_UNLOCK_OFFSET		0x8   /* SCLR unlock register */
-
 #define SLCR_PS_RST_CTRL_OFFSET		0x200 /* PS Software Reset Control */
 #define SLCR_FPGA_RST_CTRL_OFFSET	0x240 /* FPGA Software Reset Control */
 #define SLCR_A9_CPU_RST_CTRL_OFFSET	0x244 /* CPU Software Reset Control */
 #define SLCR_REBOOT_STATUS_OFFSET	0x258 /* PS Reboot Status */
+#define SLCR_PSS_IDCODE			0x530 /* PS IDCODE */
+#define SLCR_L2C_RAM			0xA1C /* L2C_RAM in AR#54190 */
 #define SLCR_LVL_SHFTR_EN_OFFSET	0x900 /* Level Shifters Enable */
 #define SLCR_OCM_CFG_OFFSET		0x910 /* OCM Address Mapping */
 
 #define SLCR_UNLOCK_MAGIC		0xDF0D
 #define SLCR_A9_CPU_CLKSTOP		0x10
 #define SLCR_A9_CPU_RST			0x1
+#define SLCR_PSS_IDCODE_DEVICE_SHIFT	12
+#define SLCR_PSS_IDCODE_DEVICE_MASK	0x1F
 
 void __iomem *zynq_slcr_base;
 static struct regmap *zynq_slcr_regmap;
+static u16 zynq_rst_code = 0;
 
 /**
  * zynq_slcr_write - Write to a register in SLCR block
@@ -49,11 +53,6 @@ static struct regmap *zynq_slcr_regmap;
  */
 static int zynq_slcr_write(u32 val, u32 offset)
 {
-	if (!zynq_slcr_regmap) {
-		writel(val, zynq_slcr_base + offset);
-		return 0;
-	}
-
 	return regmap_write(zynq_slcr_regmap, offset, val);
 }
 
@@ -67,12 +66,7 @@ static int zynq_slcr_write(u32 val, u32 offset)
  */
 static int zynq_slcr_read(u32 *val, u32 offset)
 {
-	if (zynq_slcr_regmap)
-		return regmap_read(zynq_slcr_regmap, offset, val);
-
-	*val = readl(zynq_slcr_base + offset);
-
-	return 0;
+	return regmap_read(zynq_slcr_regmap, offset, val);
 }
 
 /**
@@ -88,18 +82,35 @@ static inline int zynq_slcr_unlock(void)
 }
 
 /**
- * zynq_slcr_system_reset - Reset the entire system.
+ * zynq_slcr_get_device_id - Read device code id
+ *
+ * Return:	Device code id
  */
-void zynq_slcr_system_reset(void)
+u32 zynq_slcr_get_device_id(void)
+{
+	u32 val;
+
+	zynq_slcr_read(&val, SLCR_PSS_IDCODE);
+	val >>= SLCR_PSS_IDCODE_DEVICE_SHIFT;
+	val &= SLCR_PSS_IDCODE_DEVICE_MASK;
+
+	return val;
+}
+
+/**
+ * zynq_slcr_system_restart - Restart the entire system.
+ *
+ * @nb:		Pointer to restart notifier block (unused)
+ * @action:	Reboot mode (unused)
+ * @data:	Restart handler private data (unused)
+ *
+ * Return:	0 always
+ */
+static
+int zynq_slcr_system_restart(struct notifier_block *nb,
+			     unsigned long action, void *data)
 {
 	u32 reboot;
-
-	/*
-	 * Unlock the SLCR then reset the system.
-	 * Note that this seems to require raw i/o
-	 * functions or there's a lockup?
-	 */
-	zynq_slcr_unlock();
 
 	/*
 	 * Clear 0x0F000000 bits of reboot status register to workaround
@@ -107,9 +118,23 @@ void zynq_slcr_system_reset(void)
 	 * This is a temporary solution until we know more.
 	 */
 	zynq_slcr_read(&reboot, SLCR_REBOOT_STATUS_OFFSET);
-	zynq_slcr_write(reboot & 0xF0FFFFFF, SLCR_REBOOT_STATUS_OFFSET);
+
+	if (zynq_rst_code) {
+		reboot &= 0xF0FF0000;
+		reboot |= zynq_rst_code;
+	} else {
+		reboot &= 0xF0FFFFFF;
+	}
+
+	zynq_slcr_write(reboot, SLCR_REBOOT_STATUS_OFFSET);
 	zynq_slcr_write(1, SLCR_PS_RST_CTRL_OFFSET);
+	return 0;
 }
+
+static struct notifier_block zynq_slcr_restart_nb = {
+	.notifier_call	= zynq_slcr_system_restart,
+	.priority	= 192,
+};
 
 /**
  * zynq_slcr_get_ocm_config - Get SLCR OCM config
@@ -224,23 +249,6 @@ void zynq_slcr_cpu_state_write(int cpu, bool die)
 }
 
 /**
- * zynq_slcr_init - Regular slcr driver init
- * Return:	0 on success, negative errno otherwise.
- *
- * Called early during boot from platform code to remap SLCR area.
- */
-int __init zynq_slcr_init(void)
-{
-	zynq_slcr_regmap = syscon_regmap_lookup_by_compatible("xlnx,zynq-slcr");
-	if (IS_ERR(zynq_slcr_regmap)) {
-		pr_err("%s: failed to find zynq-slcr\n", __func__);
-		return -ENODEV;
-	}
-
-	return 0;
-}
-
-/**
  * zynq_early_slcr_init - Early slcr init function
  *
  * Return:	0 on success, negative errno otherwise.
@@ -265,8 +273,19 @@ int __init zynq_early_slcr_init(void)
 
 	np->data = (__force void *)zynq_slcr_base;
 
+	zynq_slcr_regmap = syscon_regmap_lookup_by_compatible("xlnx,zynq-slcr");
+	if (IS_ERR(zynq_slcr_regmap)) {
+		pr_err("%s: failed to find zynq-slcr\n", __func__);
+		return -ENODEV;
+	}
+
 	/* unlock the SLCR so that registers can be changed */
 	zynq_slcr_unlock();
+
+	/* See AR#54190 design advisory */
+	regmap_update_bits(zynq_slcr_regmap, SLCR_L2C_RAM, 0x70707, 0x20202);
+
+	register_restart_handler(&zynq_slcr_restart_nb);
 
 	pr_info("%s mapped to %p\n", np->name, zynq_slcr_base);
 
@@ -274,3 +293,15 @@ int __init zynq_early_slcr_init(void)
 
 	return 0;
 }
+
+#ifdef CONFIG_XILINX_RESET_CODE
+#include <linux/debugfs.h>
+static int __init init_reset_cause(void)
+{
+    debugfs_create_x16("code", 0644, debugfs_create_dir("zynq_rst", NULL), &zynq_rst_code);
+
+    return 0;
+}
+
+late_initcall(init_reset_cause);
+#endif

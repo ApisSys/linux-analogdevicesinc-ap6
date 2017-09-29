@@ -212,7 +212,7 @@ static int adv7511_set_bias_level(struct snd_soc_codec *codec,
 		}
 		break;
 	case SND_SOC_BIAS_PREPARE:
-		if (codec->dapm.bias_level == SND_SOC_BIAS_STANDBY) {
+		if (snd_soc_codec_get_bias_level(codec) == SND_SOC_BIAS_STANDBY) {
 			adv7511_packet_enable(adv7511,
 					ADV7511_PACKET_ENABLE_AUDIO_SAMPLE);
 			adv7511_packet_enable(adv7511,
@@ -235,7 +235,6 @@ static int adv7511_set_bias_level(struct snd_soc_codec *codec,
 	case SND_SOC_BIAS_OFF:
 		break;
 	}
-	codec->dapm.bias_level = level;
 	return 0;
 }
 
@@ -293,10 +292,12 @@ static struct snd_soc_codec_driver adv7511_codec_driver = {
 	.resume		    = adv7511_resume,
 	.set_bias_level	    = adv7511_set_bias_level,
 
-	.dapm_widgets	    = adv7511_dapm_widgets,
-	.num_dapm_widgets   = ARRAY_SIZE(adv7511_dapm_widgets),
-	.dapm_routes	    = adv7511_routes,
-	.num_dapm_routes    = ARRAY_SIZE(adv7511_routes),
+	.component_driver = {
+		.dapm_widgets	    = adv7511_dapm_widgets,
+		.num_dapm_widgets   = ARRAY_SIZE(adv7511_dapm_widgets),
+		.dapm_routes	    = adv7511_routes,
+		.num_dapm_routes    = ARRAY_SIZE(adv7511_routes),
+	},
 };
 
 int adv7511_audio_init(struct device *dev)

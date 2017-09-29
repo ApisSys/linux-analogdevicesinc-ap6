@@ -1,15 +1,18 @@
 /*
  * Xilinx Video Remapper
  *
- * Copyright (C) 2013 Ideas on Board SPRL
+ * Copyright (C) 2013-2015 Ideas on Board
+ * Copyright (C) 2013-2015 Xilinx, Inc.
  *
- * Contacts: Laurent Pinchart <laurent.pinchart@ideasonboard.com>
+ * Contacts: Hyun Kwon <hyun.kwon@xilinx.com>
+ *           Laurent Pinchart <laurent.pinchart@ideasonboard.com>
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 as
  * published by the Free Software Foundation.
  */
 
+#include <linux/clk.h>
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/platform_device.h>
@@ -96,11 +99,11 @@ static inline struct xremap_device *to_remap(struct v4l2_subdev *subdev)
 
 static const struct xremap_mapping xremap_mappings[] = {
 	{
-		.code = V4L2_MBUS_FMT_RBG888_1X24,
+		.code = MEDIA_BUS_FMT_RBG888_1X24,
 		.width = 8,
 		.num_components = 3,
 		.outputs = (const struct xremap_mapping_output[]) {
-			{ V4L2_MBUS_FMT_RGB888_1X32_PADHI, 4, { 1, 0, 2, 4 } },
+			{ MEDIA_BUS_FMT_RGB888_1X32_PADHI, 4, { 1, 0, 2, 4 } },
 			{ },
 		},
 	},
@@ -140,7 +143,7 @@ xremap_match_mapping(struct xremap_device *xremap,
  */
 
 static int xremap_enum_mbus_code(struct v4l2_subdev *subdev,
-				 struct v4l2_subdev_fh *fh,
+				 struct v4l2_subdev_pad_config *cfg,
 				 struct v4l2_subdev_mbus_code_enum *code)
 {
 	struct xremap_device *xremap = to_remap(subdev);
@@ -173,7 +176,7 @@ static int xremap_enum_mbus_code(struct v4l2_subdev *subdev,
 		if (code->index)
 			return -EINVAL;
 
-		format = v4l2_subdev_get_try_format(fh, code->pad);
+		format = v4l2_subdev_get_try_format(subdev, cfg, code->pad);
 		code->code = format->code;
 	}
 
@@ -181,12 +184,12 @@ static int xremap_enum_mbus_code(struct v4l2_subdev *subdev,
 }
 
 static int xremap_enum_frame_size(struct v4l2_subdev *subdev,
-				  struct v4l2_subdev_fh *fh,
+				  struct v4l2_subdev_pad_config *cfg,
 				  struct v4l2_subdev_frame_size_enum *fse)
 {
 	struct v4l2_mbus_framefmt *format;
 
-	format = v4l2_subdev_get_try_format(fh, fse->pad);
+	format = v4l2_subdev_get_try_format(subdev, cfg, fse->pad);
 
 	if (fse->index || fse->code != format->code)
 		return -EINVAL;
@@ -211,12 +214,14 @@ static int xremap_enum_frame_size(struct v4l2_subdev *subdev,
 }
 
 static struct v4l2_mbus_framefmt *
-xremap_get_pad_format(struct xremap_device *xremap, struct v4l2_subdev_fh *fh,
+xremap_get_pad_format(struct xremap_device *xremap,
+		      struct v4l2_subdev_pad_config *cfg,
 		      unsigned int pad, u32 which)
 {
 	switch (which) {
 	case V4L2_SUBDEV_FORMAT_TRY:
-		return v4l2_subdev_get_try_format(fh, pad);
+		return v4l2_subdev_get_try_format(&xremap->xvip.subdev, cfg,
+						  pad);
 	case V4L2_SUBDEV_FORMAT_ACTIVE:
 		return &xremap->formats[pad];
 	default:
@@ -225,18 +230,18 @@ xremap_get_pad_format(struct xremap_device *xremap, struct v4l2_subdev_fh *fh,
 }
 
 static int xremap_get_format(struct v4l2_subdev *subdev,
-			     struct v4l2_subdev_fh *fh,
+			     struct v4l2_subdev_pad_config *cfg,
 			     struct v4l2_subdev_format *fmt)
 {
 	struct xremap_device *xremap = to_remap(subdev);
 
-	fmt->format = *xremap_get_pad_format(xremap, fh, fmt->pad, fmt->which);
+	fmt->format = *xremap_get_pad_format(xremap, cfg, fmt->pad, fmt->which);
 
 	return 0;
 }
 
 static int xremap_set_format(struct v4l2_subdev *subdev,
-			     struct v4l2_subdev_fh *fh,
+			     struct v4l2_subdev_pad_config *cfg,
 			     struct v4l2_subdev_format *fmt)
 {
 	struct xremap_device *xremap = to_remap(subdev);
@@ -245,7 +250,7 @@ static int xremap_set_format(struct v4l2_subdev *subdev,
 	struct v4l2_mbus_framefmt *format;
 	unsigned int i;
 
-	format = xremap_get_pad_format(xremap, fh, fmt->pad, fmt->which);
+	format = xremap_get_pad_format(xremap, cfg, fmt->pad, fmt->which);
 
 	if (fmt->pad == XREMAP_PAD_SOURCE) {
 		fmt->format = *format;
@@ -281,7 +286,7 @@ static int xremap_set_format(struct v4l2_subdev *subdev,
 	fmt->format = *format;
 
 	/* Propagate the format to the source pad. */
-	format = xremap_get_pad_format(xremap, fh, XREMAP_PAD_SOURCE,
+	format = xremap_get_pad_format(xremap, cfg, XREMAP_PAD_SOURCE,
 				       fmt->which);
 	*format = fmt->format;
 	format->code = output->code;
@@ -316,7 +321,7 @@ static void xremap_init_formats(struct v4l2_subdev *subdev,
 	format.format.width = XREMAP_DEF_WIDTH;
 	format.format.height = XREMAP_DEF_HEIGHT;
 
-	xremap_set_format(subdev, fh, &format);
+	xremap_set_format(subdev, fh ? fh->pad : NULL, &format);
 }
 
 static int xremap_open(struct v4l2_subdev *subdev, struct v4l2_subdev_fh *fh)
@@ -374,36 +379,36 @@ static int xremap_parse_of(struct xremap_device *xremap)
 	int ret;
 
 	/* Parse the DT properties. */
-	ret = of_property_read_u32(node, "xlnx,axi-video-width",
+	ret = of_property_read_u32(node, "xlnx,video-width",
 				   &xremap->config.width);
 	if (ret < 0) {
 		dev_dbg(xremap->xvip.dev, "unable to parse %s property\n",
-			"xlnx,axi-video-width");
+			"xlnx,video-width");
 		return -EINVAL;
 	}
 
-	ret = of_property_read_u32(node, "#xlnx,axi-s-components",
+	ret = of_property_read_u32(node, "#xlnx,s-components",
 				   &xremap->config.num_s_components);
 	if (ret < 0) {
 		dev_dbg(xremap->xvip.dev, "unable to parse %s property\n",
-			"#xlnx,axi-s-components");
+			"#xlnx,s-components");
 		return -EINVAL;
 	}
 
-	ret = of_property_read_u32(node, "#xlnx,axi-m-components",
+	ret = of_property_read_u32(node, "#xlnx,m-components",
 				   &xremap->config.num_m_components);
 	if (ret < 0) {
 		dev_dbg(xremap->xvip.dev, "unable to parse %s property\n",
-			"#xlnx,axi-m-components");
+			"#xlnx,m-components");
 		return -EINVAL;
 	}
 
-	ret = of_property_read_u32_array(node, "xlnx,axi-component-maps",
+	ret = of_property_read_u32_array(node, "xlnx,component-maps",
 					 xremap->config.component_maps,
 					 xremap->config.num_m_components);
 	if (ret < 0) {
 		dev_dbg(xremap->xvip.dev, "unable to parse %s property\n",
-			"xlnx,axi-component-maps");
+			"xlnx,component-maps");
 		return -EINVAL;
 	}
 
@@ -464,6 +469,12 @@ static int xremap_probe(struct platform_device *pdev)
 	if (ret < 0)
 		return ret;
 
+	xremap->xvip.clk = devm_clk_get(xremap->xvip.dev, NULL);
+	if (IS_ERR(xremap->xvip.clk))
+		return PTR_ERR(xremap->xvip.clk);
+
+	clk_prepare_enable(xremap->xvip.clk);
+
 	/* Initialize V4L2 subdevice and media entity */
 	subdev = &xremap->xvip.subdev;
 	v4l2_subdev_init(subdev, &xremap_ops);
@@ -478,9 +489,9 @@ static int xremap_probe(struct platform_device *pdev)
 	xremap->pads[XREMAP_PAD_SINK].flags = MEDIA_PAD_FL_SINK;
 	xremap->pads[XREMAP_PAD_SOURCE].flags = MEDIA_PAD_FL_SOURCE;
 	subdev->entity.ops = &xremap_media_ops;
-	ret = media_entity_init(&subdev->entity, 2, xremap->pads, 0);
+	ret = media_entity_pads_init(&subdev->entity, 2, xremap->pads);
 	if (ret < 0)
-		return ret;
+		goto error;
 
 	platform_set_drvdata(pdev, xremap);
 
@@ -496,6 +507,7 @@ static int xremap_probe(struct platform_device *pdev)
 
 error:
 	media_entity_cleanup(&subdev->entity);
+	clk_disable_unprepare(xremap->xvip.clk);
 	return ret;
 }
 
@@ -507,18 +519,20 @@ static int xremap_remove(struct platform_device *pdev)
 	v4l2_async_unregister_subdev(subdev);
 	media_entity_cleanup(&subdev->entity);
 
+	clk_disable_unprepare(xremap->xvip.clk);
+
 	return 0;
 }
 
 static const struct of_device_id xremap_of_id_table[] = {
-	{ .compatible = "xlnx,axi-remapper" },
+	{ .compatible = "xlnx,v-remapper" },
 	{ }
 };
 MODULE_DEVICE_TABLE(of, xremap_of_id_table);
 
 static struct platform_driver xremap_driver = {
 	.driver = {
-		.name = "xilinx-axi-remapper",
+		.name = "xilinx-remapper",
 		.of_match_table = xremap_of_id_table,
 	},
 	.probe = xremap_probe,

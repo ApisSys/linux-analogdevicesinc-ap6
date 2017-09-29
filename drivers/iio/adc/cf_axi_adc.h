@@ -1,7 +1,7 @@
 /*
  * ADI-AIM ADI ADC Interface Module
  *
- * Copyright 2012 Analog Devices Inc.
+ * Copyright 2012-2017 Analog Devices Inc.
  *
  * Licensed under the GPL-2.
  *
@@ -26,6 +26,16 @@
 
 /* ADC COMMON */
 
+#define ADI_REG_CONFIG 			0x000C
+#define ADI_IQCORRECTION_DISABLE	(1 << 0)
+#define ADI_DCFILTER_DISABLE		(1 << 1)
+#define ADI_DATAFORMAT_DISABLE		(1 << 2)
+#define ADI_USERPORTS_DISABLE		(1 << 3)
+#define ADI_MODE_1R1T			(1 << 4)
+#define ADI_SCALECORRECTION_ONLY	(1 << 5)
+#define ADI_CMOS_OR_LVDS_N		(1 << 7)
+#define ADI_PPS_RECEIVER_ENABLE		(1 << 8)
+
 #define ADI_REG_RSTN			0x0040
 #define ADI_RSTN				(1 << 0)
 #define ADI_MMCM_RSTN 			(1 << 1)
@@ -49,7 +59,7 @@
 #define ADI_MUX_OVER_RANGE		(1 << 1)
 #define ADI_STATUS			(1 << 0)
 
-#define ADI_REG_DELAY_CNTRL		0x0060
+#define ADI_REG_DELAY_CNTRL		0x0060	/* <= v8.0 */
 #define ADI_DELAY_SEL			(1 << 17)
 #define ADI_DELAY_RWN			(1 << 16)
 #define ADI_DELAY_ADDRESS(x)		(((x) & 0xFF) << 8)
@@ -57,7 +67,7 @@
 #define ADI_DELAY_WDATA(x)		(((x) & 0x1F) << 0)
 #define ADI_TO_DELAY_WDATA(x)		(((x) >> 0) & 0x1F)
 
-#define ADI_REG_DELAY_STATUS		0x0064
+#define ADI_REG_DELAY_STATUS		0x0064 /* <= v8.0 */
 #define ADI_DELAY_LOCKED			(1 << 9)
 #define ADI_DELAY_STATUS			(1 << 8)
 #define ADI_DELAY_RDATA(x)		(((x) & 0x1F) << 0)
@@ -76,14 +86,6 @@
 #define ADI_DRP_RDATA(x)			(((x) & 0xFFFF) << 0)
 #define ADI_TO_DRP_RDATA(x)		(((x) >> 0) & 0xFFFF)
 
-#define ADI_REG_DMA_CNTRL		0x0080
-#define ADI_DMA_STREAM			(1 << 1)
-#define ADI_DMA_START			(1 << 0)
-
-#define ADI_REG_DMA_COUNT		0x0084
-#define ADI_DMA_COUNT(x)			(((x) & 0xFFFFFFFF) << 0)
-#define ADI_TO_DMA_COUNT(x)		(((x) >> 0) & 0xFFFFFFFF)
-
 #define ADI_REG_DMA_STATUS		0x0088
 #define ADI_DMA_OVF			(1 << 2)
 #define ADI_DMA_UNF			(1 << 1)
@@ -96,6 +98,12 @@
 #define ADI_REG_USR_CNTRL_1		0x00A0
 #define ADI_USR_CHANMAX(x)		(((x) & 0xFF) << 0)
 #define ADI_TO_USR_CHANMAX(x)		(((x) >> 0) & 0xFF)
+
+#define ADI_REG_GP_CONTROL		0x00BC
+
+#define ADI_REG_CLOCKS_PER_PPS		0x00C0
+#define ADI_REG_CLOCKS_PER_PPS_STATUS	0x00C4
+#define ADI_CLOCKS_PER_PPS_STAT_INVAL	(1 << 0)
 
 /* ADC CHANNEL */
 
@@ -140,7 +148,7 @@ enum adc_pn_sel {
 	ADC_PN23 = 6,
 	ADC_PN31 = 7,
 	ADC_PN_CUSTOM = 9,
-	ADC_PN_END = 10,
+	ADC_PN_OFF = 10,
 };
 
 enum adc_data_sel {
@@ -167,169 +175,33 @@ enum adc_data_sel {
 
 #define ADI_REG_ADC_DP_DISABLE 			0x00C0
 
-/*
- * ADI High-Speed ADC common spi interface registers
- * See Application-Note AN-877
- */
-
-#define ADC_REG_CHIP_PORT_CONF		0x00
-#define ADC_REG_CHIP_ID			0x01
-#define ADC_REG_CHIP_GRADE		0x02
-#define ADC_REG_CHAN_INDEX		0x05
-#define ADC_REG_TRANSFER		0xFF
-#define ADC_REG_MODES			0x08
-#define ADC_REG_TEST_IO			0x0D
-#define ADC_REG_ADC_INPUT		0x0F
-#define ADC_REG_OFFSET			0x10
-#define ADC_REG_OUTPUT_MODE		0x14
-#define ADC_REG_OUTPUT_ADJUST		0x15
-#define ADC_REG_OUTPUT_PHASE		0x16
-#define ADC_REG_OUTPUT_DELAY		0x17
-#define ADC_REG_VREF			0x18
-#define ADC_REG_ANALOG_INPUT		0x2C
-
-/* ADC_REG_TRANSFER */
-#define TRANSFER_SYNC			0x1
-
-/* ADC_REG_TEST_IO */
-#define TESTMODE_OFF			0x0
-#define TESTMODE_MIDSCALE_SHORT		0x1
-#define TESTMODE_POS_FULLSCALE		0x2
-#define TESTMODE_NEG_FULLSCALE		0x3
-#define TESTMODE_ALT_CHECKERBOARD	0x4
-#define TESTMODE_PN23_SEQ		0x5
-#define TESTMODE_PN9_SEQ			0x6
-#define TESTMODE_ONE_ZERO_TOGGLE		0x7
-#define TESTMODE_RAMP			0xF
-
-/* ADC_REG_OUTPUT_MODE */
-#define OUTPUT_MODE_OFFSET_BINARY	0x0
-#define OUTPUT_MODE_TWOS_COMPLEMENT	0x1
-#define OUTPUT_MODE_GRAY_CODE		0x2
-
-/* ADC_REG_OUTPUT_PHASE */
-#define OUTPUT_EVEN_ODD_MODE_EN		0x20
-#define INVERT_DCO_CLK			0x80
-
-/* ADC_REG_OUTPUT_DELAY */
-#define DCO_DELAY_ENABLE 		0x80
-
-
-/*
- * Analog Devices AD9467 16-Bit, 200/250 MSPS ADC
- */
-
-#define CHIPID_AD9467			0x50
-#define AD9467_DEF_OUTPUT_MODE		0x08
-#define AD9467_REG_VREF_MASK		0x0F
-
-/*
- * Analog Devices AD9643 Dual 14-Bit, 170/210/250 MSPS ADC
- */
-
-#define CHIPID_AD9643			0x82
-#define AD9643_REG_VREF_MASK		0x1F
-#define AD9643_DEF_OUTPUT_MODE		0x00
-
-/*
- * Analog Devices AD9250 Dual 14-Bit, 170/250 MSPS ADC, JESD204B
- */
-
-#define CHIPID_AD9250			0xB9
-#define AD9250_REG_VREF_MASK		0x1F
-#define AD9250_DEF_OUTPUT_MODE		0x00
-#define AD9250_AXIADC_PCORE_DATA_SEL	0x28
-#define AD9250_AXIADC_PCORE_DATA_SEL_F	(1 << 0)
-
-/*
- * Analog Devices AD9683 14-Bit, 170/250 MSPS ADC, JESD204B
- */
-
-#define CHIPID_AD9683			0xC3
-#define AD9683_DEF_OUTPUT_MODE		0x00
-#define AD9683_AXIADC_PCORE_DATA_SEL	0x28
-#define AD9683_SIGNEXTEND		(1 << 0)
-
-/*
- * Analog Devices AD9625 12-Bit, 2500 MSPS ADC, JESD204B
- */
-
-#define CHIPID_AD9625			0x41
-#define AD9625_DEF_OUTPUT_MODE		0x00
-#define AD9625_AXIADC_PCORE_DATA_SEL	0x24
-#define AD9625_SIGNEXTEND		(1 << 0)
-
-/*
- * Analog Devices AD9265 16-Bit, 125/105/80 MSPS ADC
- */
-
-#define CHIPID_AD9265			0x64
-#define AD9265_DEF_OUTPUT_MODE		0x40
-#define AD9265_REG_VREF_MASK		0xC0
-
-/*
- * Analog Devices AD9434 12-Bit, 370/500 MSPS ADC
- */
-
-#define CHIPID_AD9434			0x6A
-#define AD9434_DEF_OUTPUT_MODE		0x00
-#define AD9434_REG_VREF_MASK		0xC0
-
-/*
- * Analog Devices AD9680
- */
-
-#define AD9680_REG_CHIP_ID_LOW		0x004
-#define AD9680_REG_CHIP_ID_HIGH		0x005
-#define AD9680_REG_DEVICE_INDEX		0x008
-#define AD9680_REG_INPUT_FS_RANGE	0x025
-
-#define AD9680_REG_OUTPUT_MODE		0x561
-#define AD9680_REG_TEST_MODE		0x550
-
-#define CHIPID_AD9680			0xC5
-#define AD9680_DEF_OUTPUT_MODE		0x00
-#define AD9680_REG_VREF_MASK		0x0F
-
-/*
- * Analog Devices AD9652
- */
-
-#define CHIPID_AD9652			0xC1
-#define AD9652_REG_VREF_MASK		0xC0
+/* PCORE Version > 8.00 */
+#define ADI_REG_DELAY(l)				(0x0800 + (l) * 0x4)
 
 /* debugfs direct register access */
 #define DEBUGFS_DRA_PCORE_REG_MAGIC	0x80000000
 
-#include <linux/spi/spi.h>
+#define AXIADC_MAX_CHANNEL		16
 
-enum {
-	ID_AD9467,
-	ID_AD9643,
-	ID_AD9250,
-	ID_AD9265,
-	ID_AD9680,
-	ID_AD9683,
-	ID_AD9625,
-	ID_AD9434,
-	ID_AD9652,
-};
+#include <linux/spi/spi.h>
+#include <linux/clk/clkscale.h>
 
 struct axiadc_chip_info {
 	char				*name;
 	unsigned			num_channels;
 	unsigned 		num_shadow_slave_channels;
 	const unsigned long 	*scan_masks;
-	int			(*scale_table)[2];
+	const int			(*scale_table)[2];
 	int				num_scales;
 	int				max_testmode;
 	unsigned long			max_rate;
-	struct iio_chan_spec		channel[8];
+	struct iio_chan_spec		channel[AXIADC_MAX_CHANNEL];
 };
 
 struct axiadc_state {
 	struct device 			*dev_spi;
 	struct iio_info			iio_info;
+	struct clk 			*clk;
 	void __iomem			*regs;
 	void __iomem			*slave_regs;
 	unsigned				max_usr_channel;
@@ -337,32 +209,37 @@ struct axiadc_state {
 	unsigned			max_count;
 	unsigned			id;
 	unsigned			pcore_version;
-	bool				has_fifo_interface;
-	bool			dp_disable;
-	unsigned char		testmode[2];
-	unsigned long 		adc_clk;
-	bool				streaming_dma;
+	unsigned			decimation_factor;
+	bool				dp_disable;
+	unsigned long long		adc_clk;
 	unsigned			have_slave_channels;
 
-	struct iio_chan_spec	channels[16];
-};
+	struct iio_hw_consumer		*frontend;
 
-struct ad9361_rf_phy;
+	struct iio_chan_spec		channels[AXIADC_MAX_CHANNEL];
+};
 
 struct axiadc_converter {
 	struct spi_device 	*spi;
 	struct clk 		*clk;
-	struct ad9361_rf_phy *phy;
-	struct gpio_desc			*pwrdown_gpio;
+	struct clock_scale		adc_clkscale;
+	struct clk		*lane_clk;
+	struct clk		*sysref_clk;
+	void 			*phy;
+	struct gpio_desc		*pwrdown_gpio;
+	struct gpio_desc		*reset_gpio;
 	unsigned			id;
 	unsigned			adc_output_mode;
-	unsigned 		testmode[2];
+	unsigned 		testmode[AXIADC_MAX_CHANNEL];
+	unsigned			scratch_reg[AXIADC_MAX_CHANNEL];
 	unsigned long 		adc_clk;
 	const struct axiadc_chip_info	*chip_info;
-	int		(*read)(struct spi_device *spi, unsigned reg);
-	int		(*write)(struct spi_device *spi,
-				 unsigned reg, unsigned val);
-	int		(*setup)(struct spi_device *spi, unsigned mode);
+
+	bool			sample_rate_read_only;
+
+	int (*reg_access)(struct iio_dev *indio_dev, unsigned int reg,
+		unsigned int writeval, unsigned int *readval);
+	int (*setup)(struct spi_device *spi, unsigned mode);
 
 	struct iio_chan_spec const	*channels;
 	int				num_channels;
@@ -380,9 +257,36 @@ struct axiadc_converter {
 			 int val2,
 			 long mask);
 
+	int (*read_event_value)(struct iio_dev *indio_dev,
+			struct iio_chan_spec const *chan,
+			enum iio_event_type type,
+			enum iio_event_direction dir,
+			enum iio_event_info info,
+			int *val,
+			int *val2);
+
+	int (*write_event_value)(struct iio_dev *indio_dev,
+			struct iio_chan_spec const *chan,
+			enum iio_event_type type,
+			enum iio_event_direction dir,
+			enum iio_event_info info,
+			int val,
+			int val2);
+
+	int (*read_event_config)(struct iio_dev *indio_dev,
+			const struct iio_chan_spec *chan,
+			enum iio_event_type type,
+			enum iio_event_direction dir);
+
+	int (*write_event_config)(struct iio_dev *indio_dev,
+			const struct iio_chan_spec *chan,
+			enum iio_event_type type,
+			enum iio_event_direction dir,
+			int state);
+
 	int (*post_setup)(struct iio_dev *indio_dev);
-	int (*testmode_set)(struct iio_dev *indio_dev, unsigned chan,
-			unsigned mode);
+	int (*set_pnsel)(struct iio_dev *indio_dev, unsigned chan,
+			enum adc_pn_sel sel);
 };
 
 
@@ -426,12 +330,25 @@ static inline unsigned int axiadc_slave_read(struct axiadc_state *st, unsigned r
 	return ioread32(st->slave_regs + reg);
 }
 
+
+static inline void axiadc_idelay_set(struct axiadc_state *st,
+				unsigned lane, unsigned val)
+{
+	if (PCORE_VERSION_MAJOR(st->pcore_version) > 8) {
+		axiadc_write(st, ADI_REG_DELAY(lane), val);
+	} else {
+		axiadc_write(st, ADI_REG_DELAY_CNTRL, 0);
+		axiadc_write(st, ADI_REG_DELAY_CNTRL,
+				ADI_DELAY_ADDRESS(lane)
+				| ADI_DELAY_WDATA(val)
+				| ADI_DELAY_SEL);
+	}
+}
+
 int axiadc_set_pnsel(struct axiadc_state *st, int channel, enum adc_pn_sel sel);
 enum adc_pn_sel axiadc_get_pnsel(struct axiadc_state *st,
 			       int channel, const char **name);
 
-int axiadc_configure_ring(struct iio_dev *indio_dev, const char *dma_name);
-void axiadc_unconfigure_ring(struct iio_dev *indio_dev);
 int axiadc_configure_ring_stream(struct iio_dev *indio_dev,
 	const char *dma_name);
 void axiadc_unconfigure_ring_stream(struct iio_dev *indio_dev);

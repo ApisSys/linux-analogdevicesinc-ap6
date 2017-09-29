@@ -26,6 +26,7 @@ struct adis;
  * struct adis_data - ADIS chip variant specific data
  * @read_delay: SPI delay for read operations in us
  * @write_delay: SPI delay for write operations in us
+ * @stall_delay: SPI stall delay between tarnsfers in us
  * @glob_cmd_reg: Register address of the GLOB_CMD register
  * @msc_ctrl_reg: Register address of the MSC_CTRL register
  * @diag_stat_reg: Register address of the DIAG_STAT register
@@ -35,12 +36,14 @@ struct adis;
 struct adis_data {
 	unsigned int read_delay;
 	unsigned int write_delay;
+	unsigned int stall_delay;
 
 	unsigned int glob_cmd_reg;
 	unsigned int msc_ctrl_reg;
 	unsigned int diag_stat_reg;
 
 	unsigned int self_test_mask;
+	bool self_test_no_autoclear;
 	unsigned int startup_delay;
 
 	const char * const *status_error_msgs;
@@ -157,13 +160,14 @@ int adis_single_conversion(struct iio_dev *indio_dev,
 	const struct iio_chan_spec *chan, unsigned int error_mask,
 	int *val);
 
-#define ADIS_VOLTAGE_CHAN(addr, si, chan, name, bits) { \
+#define ADIS_VOLTAGE_CHAN(addr, si, chan, name, info_all, bits) { \
 	.type = IIO_VOLTAGE, \
 	.indexed = 1, \
 	.channel = (chan), \
 	.extend_name = name, \
 	.info_mask_separate = BIT(IIO_CHAN_INFO_RAW) | \
 		BIT(IIO_CHAN_INFO_SCALE), \
+	.info_mask_shared_by_all = info_all, \
 	.address = (addr), \
 	.scan_index = (si), \
 	.scan_type = { \
@@ -174,19 +178,20 @@ int adis_single_conversion(struct iio_dev *indio_dev,
 	}, \
 }
 
-#define ADIS_SUPPLY_CHAN(addr, si, bits) \
-	ADIS_VOLTAGE_CHAN(addr, si, 0, "supply", bits)
+#define ADIS_SUPPLY_CHAN(addr, si, info_all, bits) \
+	ADIS_VOLTAGE_CHAN(addr, si, 0, "supply", info_all, bits)
 
-#define ADIS_AUX_ADC_CHAN(addr, si, bits) \
-	ADIS_VOLTAGE_CHAN(addr, si, 1, NULL, bits)
+#define ADIS_AUX_ADC_CHAN(addr, si, info_all, bits) \
+	ADIS_VOLTAGE_CHAN(addr, si, 1, NULL, info_all, bits)
 
-#define ADIS_TEMP_CHAN(addr, si, bits) { \
+#define ADIS_TEMP_CHAN(addr, si, info_all, bits) { \
 	.type = IIO_TEMP, \
 	.indexed = 1, \
 	.channel = 0, \
 	.info_mask_separate = BIT(IIO_CHAN_INFO_RAW) | \
 		BIT(IIO_CHAN_INFO_SCALE) | \
 		BIT(IIO_CHAN_INFO_OFFSET), \
+	.info_mask_shared_by_all = info_all, \
 	.address = (addr), \
 	.scan_index = (si), \
 	.scan_type = { \
@@ -197,13 +202,14 @@ int adis_single_conversion(struct iio_dev *indio_dev,
 	}, \
 }
 
-#define ADIS_MOD_CHAN(_type, mod, addr, si, info_sep, bits) { \
+#define ADIS_MOD_CHAN(_type, mod, addr, si, info_sep, info_all, bits) { \
 	.type = (_type), \
 	.modified = 1, \
 	.channel2 = IIO_MOD_ ## mod, \
 	.info_mask_separate = BIT(IIO_CHAN_INFO_RAW) | \
 		 info_sep, \
 	.info_mask_shared_by_type = BIT(IIO_CHAN_INFO_SCALE), \
+	.info_mask_shared_by_all = info_all, \
 	.address = (addr), \
 	.scan_index = (si), \
 	.scan_type = { \
@@ -214,17 +220,17 @@ int adis_single_conversion(struct iio_dev *indio_dev,
 	}, \
 }
 
-#define ADIS_ACCEL_CHAN(mod, addr, si, info_sep, bits) \
-	ADIS_MOD_CHAN(IIO_ACCEL, mod, addr, si, info_sep, bits)
+#define ADIS_ACCEL_CHAN(mod, addr, si, info_sep, info_all, bits) \
+	ADIS_MOD_CHAN(IIO_ACCEL, mod, addr, si, info_sep, info_all, bits)
 
-#define ADIS_GYRO_CHAN(mod, addr, si, info_sep, bits) \
-	ADIS_MOD_CHAN(IIO_ANGL_VEL, mod, addr, si, info_sep, bits)
+#define ADIS_GYRO_CHAN(mod, addr, si, info_sep, info_all, bits)		\
+	ADIS_MOD_CHAN(IIO_ANGL_VEL, mod, addr, si, info_sep, info_all, bits)
 
-#define ADIS_INCLI_CHAN(mod, addr, si, info_sep, bits) \
-	ADIS_MOD_CHAN(IIO_INCLI, mod, addr, si, info_sep, bits)
+#define ADIS_INCLI_CHAN(mod, addr, si, info_sep, info_all, bits) \
+	ADIS_MOD_CHAN(IIO_INCLI, mod, addr, si, info_sep, info_all, bits)
 
-#define ADIS_ROT_CHAN(mod, addr, si, info_sep, bits) \
-	ADIS_MOD_CHAN(IIO_ROT, mod, addr, si, info_sep, bits)
+#define ADIS_ROT_CHAN(mod, addr, si, info_sep, info_all, bits) \
+	ADIS_MOD_CHAN(IIO_ROT, mod, addr, si, info_sep, info_all, bits)
 
 #ifdef CONFIG_IIO_ADIS_LIB_BUFFER
 

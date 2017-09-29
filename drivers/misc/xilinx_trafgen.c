@@ -41,6 +41,7 @@
 /* Internal RAM Offsets */
 #define XTG_PARAM_RAM_OFFSET	   0x1000  /* Parameter RAM offset */
 #define XTG_COMMAND_RAM_OFFSET	   0x8000  /* Command RAM offset */
+#define XTG_COMMAND_RAM_MSB_OFFSET 0xa000	/**< Command RAM MSB Offset */
 #define XTG_MASTER_RAM_INIT_OFFSET 0x10000 /* Master RAM initial offset(v1.0) */
 #define XTG_MASTER_RAM_OFFSET	   0xc000  /* Master RAM offset */
 
@@ -161,8 +162,10 @@
 /* Internal RAM Sizes */
 #define XTG_PRM_RAM_BLOCK_SIZE	0x400	/* PRAM Block size (1KB) */
 #define XTG_CMD_RAM_BLOCK_SIZE	0x1000	/* CRAM Block size (4KB) */
+#define XTG_EXTCMD_RAM_BLOCK_SIZE 0x400	/**< Extended CMDRAM Block Size (1KB) */
 #define XTG_PARAM_RAM_SIZE	0x800	/* Parameter RAM (2KB) */
 #define XTG_COMMAND_RAM_SIZE	0x2000	/* Command RAM (8KB) */
+#define XTG_EXTCMD_RAM_SIZE	0x800	/* Command RAM (2KB) */
 #define XTG_MASTER_RAM_SIZE	0x2000	/* Master RAM (8KB) */
 
 /* RAM Access Flags */
@@ -193,6 +196,9 @@
 /* Macro */
 #define to_xtg_dev_info(n)	((struct xtg_dev_info *)dev_get_drvdata(n))
 
+#define CMD_WDS	0x4	/* No of words in command ram per command */
+#define EXT_WDS	0x1	/* No of words in extended ram per command */
+#define MSB_INDEX	0x4
 /**
  * struct xtg_cram - Command RAM structure
  * @addr: Address Driven to a*_addr line
@@ -221,7 +227,7 @@
  * if found a proper placeholder (in uapi/).
  */
 struct xtg_cram {
-	u32 addr;
+	phys_addr_t addr;
 	u32 valid_cmd;
 	u32 last_addr;
 	u32 prot;
@@ -286,7 +292,7 @@ struct xtg_pram {
 struct xtg_dev_info {
 	void __iomem *regs;
 	struct device *dev;
-	u32 phys_base_addr;
+	phys_addr_t phys_base_addr;
 	s16 last_rd_valid_idx;
 	s16 last_wr_valid_idx;
 	u32 id;
@@ -370,16 +376,32 @@ static void xtg_access_rams(struct xtg_dev_info *tg, int where,
 {
 	u32 index;
 
-	for (index = 0; count > 0; index++, count -= 4) {
-		if (flags) {
-			if (flags & XTG_WRITE_RAM_ZERO)
-				writel(0x0, tg->regs + where + index * 4);
-			else
-				writel(data[index],
-					tg->regs + where + index * 4);
-		} else {
+	switch (flags) {
+	case XTG_WRITE_RAM_ZERO:
+		memset_io(tg->regs + where, 0, count);
+#ifdef CONFIG_PHYS_ADDR_T_64BIT
+		writel(0x0, tg->regs + where +
+			(XTG_COMMAND_RAM_MSB_OFFSET - XTG_COMMAND_RAM_OFFSET) +
+			XTG_EXTCMD_RAM_BLOCK_SIZE - XTG_CMD_RAM_BLOCK_SIZE);
+#endif
+		break;
+	case XTG_WRITE_RAM:
+		for (index = 0; count > 0; index++, count -= 4)
+			writel(data[index], tg->regs + where + index * 4);
+#ifdef CONFIG_PHYS_ADDR_T_64BIT
+		writel(data[MSB_INDEX],	tg->regs + where +
+			(XTG_COMMAND_RAM_MSB_OFFSET - XTG_COMMAND_RAM_OFFSET) +
+			XTG_EXTCMD_RAM_BLOCK_SIZE - XTG_CMD_RAM_BLOCK_SIZE);
+#endif
+		break;
+	case XTG_READ_RAM:
+		for (index = 0; count > 0; index++, count -= 4)
 			data[index] = readl(tg->regs + where + index * 4);
-		}
+#ifdef CONFIG_PHYS_ADDR_T_64BIT
+		data[MSB_INDEX] = readl(tg->regs + where +
+			(XTG_COMMAND_RAM_MSB_OFFSET - XTG_COMMAND_RAM_OFFSET));
+#endif
+		break;
 	}
 }
 
@@ -393,7 +415,12 @@ static void xtg_prepare_cmd_words(struct xtg_dev_info *tg,
 				const struct xtg_cram *cmdp, u32 *cmd_words)
 {
 	/* Command Word 0 */
-	cmd_words[0] = cmdp->addr;
+	cmd_words[0] = lower_32_bits(cmdp->addr);
+
+	/* Command Word 4 */
+#ifdef CONFIG_PHYS_ADDR_T_64BIT
+	cmd_words[MSB_INDEX] = upper_32_bits(cmdp->addr);
+#endif
 
 	/* Command Word 1 */
 	cmd_words[1] = 0;
@@ -592,23 +619,20 @@ static ssize_t xtg_sysfs_ioctl(struct device *dev, const char *buf,
 		break;
 
 	case XTG_CLEAR_MRAM:
-		if (wrval)
-			xtg_access_rams(tg, tg->xtg_mram_offset,
-				XTG_MASTER_RAM_SIZE, XTG_WRITE_RAM |
+		xtg_access_rams(tg, tg->xtg_mram_offset,
+				XTG_MASTER_RAM_SIZE,
 				XTG_WRITE_RAM_ZERO, NULL);
 		break;
 
 	case XTG_CLEAR_CRAM:
-		if (wrval)
-			xtg_access_rams(tg, XTG_COMMAND_RAM_OFFSET,
-				XTG_COMMAND_RAM_SIZE, XTG_WRITE_RAM |
+		xtg_access_rams(tg, XTG_COMMAND_RAM_OFFSET,
+				XTG_COMMAND_RAM_SIZE,
 				XTG_WRITE_RAM_ZERO, NULL);
 		break;
 
 	case XTG_CLEAR_PRAM:
-		if (wrval)
-			xtg_access_rams(tg, XTG_PARAM_RAM_OFFSET,
-				XTG_PARAM_RAM_SIZE, XTG_WRITE_RAM |
+		xtg_access_rams(tg, XTG_PARAM_RAM_OFFSET,
+				XTG_PARAM_RAM_SIZE,
 				XTG_WRITE_RAM_ZERO, NULL);
 		break;
 
@@ -668,262 +692,256 @@ static ssize_t xtg_sysfs_ioctl(struct device *dev, const char *buf,
 
 /* Sysfs functions */
 
-static ssize_t xtg_show_id(struct device *dev,
+static ssize_t id_show(struct device *dev,
 		struct device_attribute *attr, char *buf)
 {
 	ssize_t rdval = xtg_sysfs_ioctl(dev, buf, XTG_GET_DEVICE_ID);
 
-	return sprintf(buf, "%d\n", rdval);
+	return snprintf(buf, PAGE_SIZE, "%zd\n", rdval);
 }
-static DEVICE_ATTR(id, S_IRUGO, xtg_show_id, NULL);
+static DEVICE_ATTR_RO(id);
 
-static ssize_t xtg_show_resource(struct device *dev,
+static ssize_t resource_show(struct device *dev,
 		struct device_attribute *attr, char *buf)
 {
 	ssize_t rdval = xtg_sysfs_ioctl(dev, buf, XTG_GET_RESOURCE);
 
-	return sprintf(buf, "0x%08x\n", rdval);
+	return snprintf(buf, PAGE_SIZE, "0x%08zx\n", rdval);
 }
-static DEVICE_ATTR(resource, S_IRUGO, xtg_show_resource, NULL);
+static DEVICE_ATTR_RO(resource);
 
-static ssize_t xtg_show_master_cmp_status(struct device *dev,
+static ssize_t master_start_stop_show(struct device *dev,
 		struct device_attribute *attr, char *buf)
 {
 	ssize_t rdval = xtg_sysfs_ioctl(dev, buf, XTG_GET_MASTER_CMP_STS);
 
-	return sprintf(buf, "%d\n", rdval);
+	return snprintf(buf, PAGE_SIZE, "%zd\n", rdval);
 }
 
-static ssize_t xtg_start_master_logic(struct device *dev,
+static ssize_t master_start_stop_store(struct device *dev,
 		struct device_attribute *attr, const char *buf, size_t size)
 {
 	xtg_sysfs_ioctl(dev, buf, XTG_START_MASTER_LOGIC);
 
 	return size;
 }
-static DEVICE_ATTR(start_master, 0644, xtg_show_master_cmp_status,
-				xtg_start_master_logic);
+static DEVICE_ATTR_RW(master_start_stop);
 
-static ssize_t xtg_show_slv_ctrl_status(struct device *dev,
+static ssize_t config_slave_status_show(struct device *dev,
 		struct device_attribute *attr, char *buf)
 {
 	ssize_t rdval = xtg_sysfs_ioctl(dev, buf, XTG_GET_SLV_CTRL_REG);
 
-	return sprintf(buf, "0x%08x\n", rdval);
+	return snprintf(buf, PAGE_SIZE, "0x%08zx\n", rdval);
 }
 
-static ssize_t xtg_config_slv_ctrl(struct device *dev,
+static ssize_t config_slave_status_store(struct device *dev,
 		struct device_attribute *attr, const char *buf, size_t size)
 {
 	xtg_sysfs_ioctl(dev, buf, XTG_SET_SLV_CTRL_REG);
 
 	return size;
 }
-static DEVICE_ATTR(config_slave, 0644, xtg_show_slv_ctrl_status,
-				xtg_config_slv_ctrl);
+static DEVICE_ATTR_RW(config_slave_status);
 
-static ssize_t xtg_show_errs(struct device *dev,
+static ssize_t err_sts_show(struct device *dev,
 		struct device_attribute *attr, char *buf)
 {
 	ssize_t rdval = xtg_sysfs_ioctl(dev, buf, XTG_GET_ERR_STS);
 
-	return sprintf(buf, "0x%08x\n", rdval);
+	return snprintf(buf, PAGE_SIZE, "0x%08zx\n", rdval);
 }
 
-static ssize_t xtg_clear_errs(struct device *dev,
+static ssize_t err_sts_store(struct device *dev,
 		struct device_attribute *attr, const char *buf, size_t size)
 {
 	xtg_sysfs_ioctl(dev, buf, XTG_CLEAR_ERRORS);
 
 	return size;
 }
-static DEVICE_ATTR(err_sts, 0644, xtg_show_errs, xtg_clear_errs);
+static DEVICE_ATTR_RW(err_sts);
 
-static ssize_t xtg_enable_errs(struct device *dev,
+static ssize_t err_en_store(struct device *dev,
 		struct device_attribute *attr, const char *buf, size_t size)
 {
 	xtg_sysfs_ioctl(dev, buf, XTG_ENABLE_ERRORS);
 
 	return size;
 }
-static DEVICE_ATTR(err_en, 0644, NULL, xtg_enable_errs);
+static DEVICE_ATTR_WO(err_en);
 
-static ssize_t xtg_enable_interrupts(struct device *dev,
+static ssize_t intr_en_store(struct device *dev,
 		struct device_attribute *attr, const char *buf, size_t size)
 {
 	xtg_sysfs_ioctl(dev, buf, XTG_ENABLE_INTRS);
 
 	return size;
 }
-static DEVICE_ATTR(intr_en, 0644, NULL, xtg_enable_interrupts);
+static DEVICE_ATTR_WO(intr_en);
 
-static ssize_t xtg_show_last_valid_index(struct device *dev,
+static ssize_t last_valid_index_show(struct device *dev,
 		struct device_attribute *attr, char *buf)
 {
 	ssize_t rdval = xtg_sysfs_ioctl(dev, buf, XTG_GET_LAST_VALID_INDEX);
 
-	return sprintf(buf, "0x%08x\n", rdval);
+	return snprintf(buf, PAGE_SIZE, "0x%08zx\n", rdval);
 }
-static DEVICE_ATTR(last_valid_index, S_IRUGO, xtg_show_last_valid_index, NULL);
+static DEVICE_ATTR_RO(last_valid_index);
 
-static ssize_t xtg_show_config_status(struct device *dev,
+static ssize_t config_sts_show(struct device *dev,
 		struct device_attribute *attr, char *buf)
 {
 	ssize_t rdval = xtg_sysfs_ioctl(dev, buf, XTG_GET_CFG_STS);
 
-	return sprintf(buf, "0x%08x\n", rdval);
+	return snprintf(buf, PAGE_SIZE, "0x%08zx\n", rdval);
 }
-static DEVICE_ATTR(config_sts, S_IRUGO, xtg_show_config_status, NULL);
+static DEVICE_ATTR_RO(config_sts);
 
-static ssize_t xtg_clear_mram(struct device *dev,
+static ssize_t mram_clear_store(struct device *dev,
 		struct device_attribute *attr, const char *buf, size_t size)
 {
 	xtg_sysfs_ioctl(dev, buf, XTG_CLEAR_MRAM);
 
 	return size;
 }
-static DEVICE_ATTR(mram_clear, 0644, NULL, xtg_clear_mram);
+static DEVICE_ATTR_WO(mram_clear);
 
-static ssize_t xtg_clear_cram(struct device *dev,
+static ssize_t cram_clear_store(struct device *dev,
 		struct device_attribute *attr, const char *buf, size_t size)
 {
 	xtg_sysfs_ioctl(dev, buf, XTG_CLEAR_CRAM);
 
 	return size;
 }
-static DEVICE_ATTR(cram_clear, 0644, NULL, xtg_clear_cram);
+static DEVICE_ATTR_WO(cram_clear);
 
-static ssize_t xtg_clear_pram(struct device *dev,
+static ssize_t pram_clear_store(struct device *dev,
 		struct device_attribute *attr, const char *buf, size_t size)
 {
 	xtg_sysfs_ioctl(dev, buf, XTG_CLEAR_CRAM);
 
 	return size;
 }
-static DEVICE_ATTR(pram_clear, 0644, NULL, xtg_clear_pram);
+static DEVICE_ATTR_WO(pram_clear);
 
-static ssize_t xtg_show_static_enable(struct device *dev,
+static ssize_t static_enable_show(struct device *dev,
 		struct device_attribute *attr, char *buf)
 {
 	ssize_t rdval = xtg_sysfs_ioctl(dev, buf, XTG_GET_STATIC_ENABLE);
 
-	return sprintf(buf, "0x%08x\n", rdval);
+	return snprintf(buf, PAGE_SIZE, "0x%08zx\n", rdval);
 }
 
-static ssize_t xtg_static_enable(struct device *dev,
+static ssize_t static_enable_store(struct device *dev,
 		struct device_attribute *attr, const char *buf, size_t size)
 {
 	xtg_sysfs_ioctl(dev, buf, XTG_SET_STATIC_ENABLE);
 
 	return size;
 }
-static DEVICE_ATTR(static_en, 0644, xtg_show_static_enable, xtg_static_enable);
+static DEVICE_ATTR_RW(static_enable);
 
-static ssize_t xtg_get_static_burstlen(struct device *dev,
+static ssize_t static_burstlen_show(struct device *dev,
 		struct device_attribute *attr, char *buf)
 {
 	ssize_t rdval = xtg_sysfs_ioctl(dev, buf, XTG_GET_STATIC_BURSTLEN);
 
-	return sprintf(buf, "%d\n", rdval);
+	return snprintf(buf, PAGE_SIZE, "%zd\n", rdval);
 }
 
-static ssize_t xtg_static_burstlen(struct device *dev,
+static ssize_t static_burstlen_store(struct device *dev,
 		struct device_attribute *attr, const char *buf, size_t size)
 {
 	xtg_sysfs_ioctl(dev, buf, XTG_SET_STATIC_BURSTLEN);
 
 	return size;
 }
-static DEVICE_ATTR(static_burstlen, 0644, xtg_get_static_burstlen,
-			xtg_static_burstlen);
+static DEVICE_ATTR_RW(static_burstlen);
 
-static ssize_t xtg_get_static_transferdone(struct device *dev,
+static ssize_t static_transferdone_show(struct device *dev,
 		struct device_attribute *attr, char *buf)
 {
 	ssize_t rdval = xtg_sysfs_ioctl(dev, buf, XTG_GET_STATIC_TRANSFERDONE);
 
-	return sprintf(buf, "%d\n", rdval);
+	return snprintf(buf, PAGE_SIZE, "%zd\n", rdval);
 }
 
-static ssize_t xtg_static_transferdone(struct device *dev,
+static ssize_t static_transferdone_store(struct device *dev,
 		struct device_attribute *attr, const char *buf, size_t size)
 {
 	xtg_sysfs_ioctl(dev, buf, XTG_SET_STATIC_TRANSFERDONE);
 
 	return size;
 }
-static DEVICE_ATTR(static_transferdone, 0644, xtg_get_static_transferdone,
-				xtg_static_transferdone);
+static DEVICE_ATTR_RW(static_transferdone);
 
-static ssize_t xtg_reset_static_transferdone(struct device *dev,
+static ssize_t reset_static_transferdone_show(struct device *dev,
 		struct device_attribute *attr, char *buf)
 {
 	ssize_t rdval = xtg_sysfs_ioctl(dev, buf, XTG_GET_STATIC_TRANSFERDONE);
+
 	if (rdval == XTG_STATIC_CNTL_RESET_MASK)
 		rdval = 1;
 	else
 		rdval = 0;
-	return sprintf(buf, "%d\n", rdval);
+	return snprintf(buf, PAGE_SIZE, "%zd\n", rdval);
 }
-static DEVICE_ATTR(reset_static_transferdone, 0644,
-			xtg_reset_static_transferdone, NULL);
+static DEVICE_ATTR_RO(reset_static_transferdone);
 
-static ssize_t xtg_show_stream_enable(struct device *dev,
+static ssize_t stream_enable_show(struct device *dev,
 		struct device_attribute *attr, char *buf)
 {
 	ssize_t rdval = xtg_sysfs_ioctl(dev, buf, XTG_GET_STREAM_ENABLE);
 
-	return sprintf(buf, "0x%08x\n", rdval);
+	return snprintf(buf, PAGE_SIZE, "0x%08zx\n", rdval);
 }
 
-static ssize_t xtg_stream_enable(struct device *dev,
+static ssize_t stream_enable_store(struct device *dev,
 		struct device_attribute *attr, const char *buf, size_t size)
 {
 	xtg_sysfs_ioctl(dev, buf, XTG_SET_STREAM_ENABLE);
 
 	return size;
 }
-static DEVICE_ATTR(stream_en, 0644, xtg_show_stream_enable, xtg_stream_enable);
+static DEVICE_ATTR_RW(stream_enable);
 
-static ssize_t xtg_get_stream_transferlen(struct device *dev,
+static ssize_t stream_transferlen_show(struct device *dev,
 		struct device_attribute *attr, char *buf)
 {
 	ssize_t rdval = xtg_sysfs_ioctl(dev, buf, XTG_GET_STREAM_TRANSFERLEN);
 
-	return sprintf(buf, "%d\n", rdval);
+	return snprintf(buf, PAGE_SIZE, "%zd\n", rdval);
 }
 
-static ssize_t xtg_set_stream_transferlen(struct device *dev,
+static ssize_t stream_transferlen_store(struct device *dev,
 		struct device_attribute *attr, const char *buf, size_t size)
 {
 	xtg_sysfs_ioctl(dev, buf, XTG_SET_STREAM_TRANSFERLEN);
 
 	return size;
 }
-static DEVICE_ATTR(stream_transferlen, 0644, xtg_get_stream_transferlen,
-				xtg_set_stream_transferlen);
+static DEVICE_ATTR_RW(stream_transferlen);
 
-static ssize_t xtg_get_stream_transfercnt(struct device *dev,
+static ssize_t stream_transfercnt_show(struct device *dev,
 		struct device_attribute *attr, char *buf)
 {
 	ssize_t rdval = xtg_sysfs_ioctl(dev, buf, XTG_GET_STREAM_TRANSFERCNT);
 
-	return sprintf(buf, "%d\n", rdval);
+	return snprintf(buf, PAGE_SIZE, "%zd\n", rdval);
 }
 
-static ssize_t xtg_set_stream_transfercnt(struct device *dev,
+static ssize_t stream_transfercnt_store(struct device *dev,
 		struct device_attribute *attr, const char *buf, size_t size)
 {
 	xtg_sysfs_ioctl(dev, buf, XTG_SET_STREAM_TRANSFERCNT);
 
 	return size;
 }
-static DEVICE_ATTR(stream_transfercnt, 0644, xtg_get_stream_transfercnt,
-				xtg_set_stream_transfercnt);
+static DEVICE_ATTR_RW(stream_transfercnt);
 
 static ssize_t xtg_pram_read(struct file *filp, struct kobject *kobj,
-				struct bin_attribute *bin_attr,
-				char *buf, loff_t off, size_t count)
+			     struct bin_attribute *bin_attr,
+			     char *buf, loff_t off, size_t count)
 {
 	pr_info("No read access to Parameter RAM\n");
 
@@ -980,9 +998,9 @@ static ssize_t xtg_pram_write(struct file *filp, struct kobject *kobj,
 	return count;
 }
 
-static ssize_t xtg_pram_mmap(struct file *filp, struct kobject *kobj,
-				struct bin_attribute *attr,
-				struct vm_area_struct *vma)
+static int xtg_pram_mmap(struct file *filp, struct kobject *kobj,
+			 struct bin_attribute *attr,
+			 struct vm_area_struct *vma)
 {
 	struct xtg_dev_info *tg =
 		to_xtg_dev_info(container_of(kobj, struct device, kobj));
@@ -1000,7 +1018,7 @@ static ssize_t xtg_pram_mmap(struct file *filp, struct kobject *kobj,
 static struct bin_attribute xtg_pram_attr = {
 	.attr =	{
 		.name = "parameter_ram",
-		.mode = S_IRUGO | S_IWUSR,
+		.mode = 0644,
 	},
 	.size = XTG_PARAM_RAM_SIZE,
 	.read = xtg_pram_read,
@@ -1037,7 +1055,7 @@ static ssize_t xtg_cram_write(struct file *filp, struct kobject *kobj,
 	/* Program each command */
 	if (count == sizeof(struct xtg_cram)) {
 		struct xtg_cram *cmdp = (struct xtg_cram *)buf;
-		u32 cmd_words[4];
+		u32 cmd_words[CMD_WDS + EXT_WDS];
 
 		if (!cmdp)
 			return -EINVAL;
@@ -1077,9 +1095,9 @@ static ssize_t xtg_cram_write(struct file *filp, struct kobject *kobj,
 	return count;
 }
 
-static ssize_t xtg_cram_mmap(struct file *filp, struct kobject *kobj,
-				struct bin_attribute *attr,
-				struct vm_area_struct *vma)
+static int xtg_cram_mmap(struct file *filp, struct kobject *kobj,
+			 struct bin_attribute *attr,
+			 struct vm_area_struct *vma)
 {
 	struct xtg_dev_info *tg =
 		to_xtg_dev_info(container_of(kobj, struct device, kobj));
@@ -1090,14 +1108,15 @@ static ssize_t xtg_cram_mmap(struct file *filp, struct kobject *kobj,
 
 	ret = remap_pfn_range(vma, vma->vm_start, (tg->phys_base_addr +
 			XTG_COMMAND_RAM_OFFSET) >> PAGE_SHIFT,
-			XTG_COMMAND_RAM_SIZE, vma->vm_page_prot);
+			XTG_COMMAND_RAM_SIZE + XTG_EXTCMD_RAM_SIZE,
+			vma->vm_page_prot);
 	return ret;
 }
 
 static struct bin_attribute xtg_cram_attr = {
 	.attr =	{
 		.name = "command_ram",
-		.mode = S_IRUGO | S_IWUSR,
+		.mode = 0644,
 	},
 	.size = XTG_COMMAND_RAM_SIZE,
 	.read = xtg_cram_read,
@@ -1136,9 +1155,9 @@ static ssize_t xtg_mram_write(struct file *filp, struct kobject *kobj,
 	return count;
 }
 
-static ssize_t xtg_mram_mmap(struct file *filp, struct kobject *kobj,
-				struct bin_attribute *attr,
-				struct vm_area_struct *vma)
+static int xtg_mram_mmap(struct file *filp, struct kobject *kobj,
+			 struct bin_attribute *attr,
+			 struct vm_area_struct *vma)
 {
 	struct xtg_dev_info *tg =
 		to_xtg_dev_info(container_of(kobj, struct device, kobj));
@@ -1157,7 +1176,7 @@ static ssize_t xtg_mram_mmap(struct file *filp, struct kobject *kobj,
 static struct bin_attribute xtg_mram_attr = {
 	.attr =	{
 		.name = "master_ram",
-		.mode = S_IRUGO | S_IWUSR,
+		.mode = 0644,
 	},
 	.size = XTG_MASTER_RAM_SIZE,
 	.read = xtg_mram_read,
@@ -1175,8 +1194,8 @@ static struct bin_attribute *xtg_bin_attrs[] = {
 static const struct attribute *xtg_attrs[] = {
 	&dev_attr_id.attr,
 	&dev_attr_resource.attr,
-	&dev_attr_start_master.attr,
-	&dev_attr_config_slave.attr,
+	&dev_attr_master_start_stop.attr,
+	&dev_attr_config_slave_status.attr,
 	&dev_attr_err_en.attr,
 	&dev_attr_err_sts.attr,
 	&dev_attr_intr_en.attr,
@@ -1185,12 +1204,12 @@ static const struct attribute *xtg_attrs[] = {
 	&dev_attr_mram_clear.attr,
 	&dev_attr_cram_clear.attr,
 	&dev_attr_pram_clear.attr,
-	&dev_attr_static_en.attr,
+	&dev_attr_static_enable.attr,
 	&dev_attr_static_burstlen.attr,
 	&dev_attr_static_transferdone.attr,
 	&dev_attr_stream_transfercnt.attr,
 	&dev_attr_stream_transferlen.attr,
-	&dev_attr_stream_en.attr,
+	&dev_attr_stream_enable.attr,
 	&dev_attr_reset_static_transferdone.attr,
 	NULL,
 };
@@ -1359,7 +1378,7 @@ static int xtg_remove(struct platform_device *pdev)
 	return 0;
 }
 
-static struct of_device_id xtg_of_match[] = {
+static const struct of_device_id xtg_of_match[] = {
 	{ .compatible = "xlnx,axi-traffic-gen", },
 	{ /* end of table */ }
 };
@@ -1368,7 +1387,6 @@ MODULE_DEVICE_TABLE(of, xtg_of_match);
 static struct platform_driver xtg_driver = {
 	.driver = {
 		.name = "xilinx-trafgen",
-		.owner = THIS_MODULE,
 		.of_match_table = xtg_of_match,
 	},
 	.probe = xtg_probe,
@@ -1379,4 +1397,4 @@ module_platform_driver(xtg_driver);
 
 MODULE_AUTHOR("Xilinx Inc.");
 MODULE_DESCRIPTION("Xilinx Traffic Generator driver");
-MODULE_LICENSE("GPL v2");
+MODULE_LICENSE("GPL");

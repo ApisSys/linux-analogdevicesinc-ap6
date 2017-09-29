@@ -1,9 +1,11 @@
 /*
  * Xilinx Video Switch
  *
- * Copyright (C) 2014 Ideas on Board SPRL
+ * Copyright (C) 2013-2015 Ideas on Board
+ * Copyright (C) 2013-2015 Xilinx, Inc.
  *
- * Contacts: Laurent Pinchart <laurent.pinchart@ideasonboard.com>
+ * Contacts: Hyun Kwon <hyun.kwon@xilinx.com>
+ *           Laurent Pinchart <laurent.pinchart@ideasonboard.com>
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 as
@@ -113,12 +115,13 @@ static int xsw_s_stream(struct v4l2_subdev *subdev, int enable)
  */
 
 static struct v4l2_mbus_framefmt *
-xsw_get_pad_format(struct xswitch_device *xsw, struct v4l2_subdev_fh *fh,
+xsw_get_pad_format(struct xswitch_device *xsw,
+		   struct v4l2_subdev_pad_config *cfg,
 		   unsigned int pad, u32 which)
 {
 	switch (which) {
 	case V4L2_SUBDEV_FORMAT_TRY:
-		return v4l2_subdev_get_try_format(fh, pad);
+		return v4l2_subdev_get_try_format(&xsw->xvip.subdev, cfg, pad);
 	case V4L2_SUBDEV_FORMAT_ACTIVE:
 		return &xsw->formats[pad];
 	default:
@@ -127,7 +130,7 @@ xsw_get_pad_format(struct xswitch_device *xsw, struct v4l2_subdev_fh *fh,
 }
 
 static int xsw_get_format(struct v4l2_subdev *subdev,
-			  struct v4l2_subdev_fh *fh,
+			  struct v4l2_subdev_pad_config *cfg,
 			  struct v4l2_subdev_format *fmt)
 {
 	struct xswitch_device *xsw = to_xsw(subdev);
@@ -141,35 +144,35 @@ static int xsw_get_format(struct v4l2_subdev *subdev,
 		}
 	}
 
-	fmt->format = *xsw_get_pad_format(xsw, fh, pad, fmt->which);
+	fmt->format = *xsw_get_pad_format(xsw, cfg, pad, fmt->which);
 
 	return 0;
 }
 
 static int xsw_set_format(struct v4l2_subdev *subdev,
-			  struct v4l2_subdev_fh *fh,
+			  struct v4l2_subdev_pad_config *cfg,
 			  struct v4l2_subdev_format *fmt)
 {
 	struct xswitch_device *xsw = to_xsw(subdev);
-	struct v4l2_mbus_framefmt *__format;
+	struct v4l2_mbus_framefmt *format;
 
 	/* The source pad format is always identical to the sink pad format and
 	 * can't be modified.
 	 */
 	if (fmt->pad >= xsw->nsinks)
-		return xsw_get_format(subdev, fh, fmt);
+		return xsw_get_format(subdev, cfg, fmt);
 
-	__format = xsw_get_pad_format(xsw, fh, fmt->pad, fmt->which);
+	format = xsw_get_pad_format(xsw, cfg, fmt->pad, fmt->which);
 
-	__format->code = fmt->format.code;
-	__format->width = clamp_t(unsigned int, fmt->format.width,
-				  XVIP_MIN_WIDTH, XVIP_MAX_WIDTH);
-	__format->height = clamp_t(unsigned int, fmt->format.height,
-				   XVIP_MIN_HEIGHT, XVIP_MAX_HEIGHT);
-	__format->field = V4L2_FIELD_NONE;
-	__format->colorspace = V4L2_COLORSPACE_SRGB;
+	format->code = fmt->format.code;
+	format->width = clamp_t(unsigned int, fmt->format.width,
+				XVIP_MIN_WIDTH, XVIP_MAX_WIDTH);
+	format->height = clamp_t(unsigned int, fmt->format.height,
+				 XVIP_MIN_HEIGHT, XVIP_MAX_HEIGHT);
+	format->field = V4L2_FIELD_NONE;
+	format->colorspace = V4L2_COLORSPACE_SRGB;
 
-	fmt->format = *__format;
+	fmt->format = *format;
 
 	return 0;
 }
@@ -180,7 +183,7 @@ static int xsw_get_routing(struct v4l2_subdev *subdev,
 	struct xswitch_device *xsw = to_xsw(subdev);
 	unsigned int i;
 
-	mutex_lock(&subdev->entity.parent->graph_mutex);
+	mutex_lock(&subdev->entity.graph_obj.mdev->graph_mutex);
 
 	for (i = 0; i < min(xsw->nsources, route->num_routes); ++i) {
 		route->routes[i].sink = xsw->routing[i];
@@ -189,7 +192,7 @@ static int xsw_get_routing(struct v4l2_subdev *subdev,
 
 	route->num_routes = xsw->nsources;
 
-	mutex_unlock(&subdev->entity.parent->graph_mutex);
+	mutex_unlock(&subdev->entity.graph_obj.mdev->graph_mutex);
 
 	return 0;
 }
@@ -201,7 +204,7 @@ static int xsw_set_routing(struct v4l2_subdev *subdev,
 	unsigned int i;
 	int ret = 0;
 
-	mutex_lock(&subdev->entity.parent->graph_mutex);
+	mutex_lock(&subdev->entity.graph_obj.mdev->graph_mutex);
 
 	if (subdev->entity.stream_count) {
 		ret = -EBUSY;
@@ -216,7 +219,7 @@ static int xsw_set_routing(struct v4l2_subdev *subdev,
 			route->routes[i].sink;
 
 done:
-	mutex_unlock(&subdev->entity.parent->graph_mutex);
+	mutex_unlock(&subdev->entity.graph_obj.mdev->graph_mutex);
 	return ret;
 }
 
@@ -253,7 +256,7 @@ static void xsw_init_formats(struct v4l2_subdev *subdev,
 		format.format.width = 1920;
 		format.format.height = 1080;
 
-		xsw_set_format(subdev, fh, &format);
+		xsw_set_format(subdev, fh ? fh->pad : NULL, &format);
 	}
 }
 
@@ -348,7 +351,6 @@ static int xsw_probe(struct platform_device *pdev)
 {
 	struct v4l2_subdev *subdev;
 	struct xswitch_device *xsw;
-	struct resource *res;
 	unsigned int npads;
 	unsigned int i;
 	int ret;
@@ -363,10 +365,9 @@ static int xsw_probe(struct platform_device *pdev)
 	if (ret < 0)
 		return ret;
 
-	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-	xsw->xvip.iomem = devm_ioremap_resource(&pdev->dev, res);
-	if (IS_ERR(xsw->xvip.iomem))
-		return PTR_ERR(xsw->xvip.iomem);
+	ret = xvip_init_resources(&xsw->xvip);
+	if (ret < 0)
+		return ret;
 
 	/* Initialize V4L2 subdevice and media entity. Pad numbers depend on the
 	 * number of pads.
@@ -375,7 +376,7 @@ static int xsw_probe(struct platform_device *pdev)
 	xsw->pads = devm_kzalloc(&pdev->dev, npads * sizeof(*xsw->pads),
 				 GFP_KERNEL);
 	if (!xsw->pads)
-		return -ENOMEM;
+		goto error;
 
 	for (i = 0; i < xsw->nsinks; ++i)
 		xsw->pads[i].flags = MEDIA_PAD_FL_SINK;
@@ -386,7 +387,7 @@ static int xsw_probe(struct platform_device *pdev)
 				    xsw->nsinks * sizeof(*xsw->formats),
 				    GFP_KERNEL);
 	if (!xsw->formats)
-		return -ENOMEM;
+		goto error;
 
 	for (i = 0; i < xsw->nsources; ++i)
 		xsw->routing[i] = i < xsw->nsinks ? i : -1;
@@ -402,9 +403,9 @@ static int xsw_probe(struct platform_device *pdev)
 
 	xsw_init_formats(subdev, NULL);
 
-	ret = media_entity_init(&subdev->entity, npads, xsw->pads, 0);
+	ret = media_entity_pads_init(&subdev->entity, npads, xsw->pads);
 	if (ret < 0)
-		return ret;
+		goto error;
 
 	platform_set_drvdata(pdev, xsw);
 
@@ -413,11 +414,15 @@ static int xsw_probe(struct platform_device *pdev)
 	ret = v4l2_async_register_subdev(subdev);
 	if (ret < 0) {
 		dev_err(&pdev->dev, "failed to register subdev\n");
-		media_entity_cleanup(&subdev->entity);
-		return ret;
+		goto error;
 	}
 
 	return 0;
+
+error:
+	media_entity_cleanup(&subdev->entity);
+	xvip_cleanup_resources(&xsw->xvip);
+	return ret;
 }
 
 static int xsw_remove(struct platform_device *pdev)
@@ -428,18 +433,20 @@ static int xsw_remove(struct platform_device *pdev)
 	v4l2_async_unregister_subdev(subdev);
 	media_entity_cleanup(&subdev->entity);
 
+	xvip_cleanup_resources(&xsw->xvip);
+
 	return 0;
 }
 
 static const struct of_device_id xsw_of_id_table[] = {
-	{ .compatible = "xlnx,axi-switch-1.0" },
+	{ .compatible = "xlnx,v-switch-1.0" },
 	{ }
 };
 MODULE_DEVICE_TABLE(of, xsw_of_id_table);
 
 static struct platform_driver xsw_driver = {
 	.driver = {
-		.name		= "xilinx-axi-switch",
+		.name		= "xilinx-switch",
 		.of_match_table	= xsw_of_id_table,
 	},
 	.probe			= xsw_probe,

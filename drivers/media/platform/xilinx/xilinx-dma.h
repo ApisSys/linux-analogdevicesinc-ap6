@@ -1,9 +1,11 @@
 /*
  * Xilinx Video DMA
  *
- * Copyright (C) 2013 Ideas on Board SPRL
+ * Copyright (C) 2013-2015 Ideas on Board
+ * Copyright (C) 2013-2015 Xilinx, Inc.
  *
- * Contacts: Laurent Pinchart <laurent.pinchart@ideasonboard.com>
+ * Contacts: Hyun Kwon <hyun.kwon@xilinx.com>
+ *           Laurent Pinchart <laurent.pinchart@ideasonboard.com>
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 as
@@ -15,11 +17,12 @@
 
 #include <linux/dmaengine.h>
 #include <linux/mutex.h>
+#include <linux/spinlock.h>
 #include <linux/videodev2.h>
 
 #include <media/media-entity.h>
 #include <media/v4l2-dev.h>
-#include <media/videobuf2-core.h>
+#include <media/videobuf2-v4l2.h>
 
 struct dma_chan;
 struct xvip_composite_device;
@@ -62,8 +65,9 @@ static inline struct xvip_pipeline *to_xvip_pipeline(struct media_entity *e)
  * @format: active V4L2 pixel format
  * @fmtinfo: format information corresponding to the active @format
  * @queue: vb2 buffers queue
- * @alloc_ctx: allocation context for the vb2 @queue
  * @sequence: V4L2 buffers sequence number
+ * @queued_bufs: list of queued buffers
+ * @queued_lock: protects the buf_queued list
  * @dma: DMA engine channel
  * @align: transfer alignment required by the DMA channel (in bytes)
  * @xt: dma interleaved template for dma configuration
@@ -83,8 +87,10 @@ struct xvip_dma {
 	const struct xvip_video_format *fmtinfo;
 
 	struct vb2_queue queue;
-	void *alloc_ctx;
 	unsigned int sequence;
+
+	struct list_head queued_bufs;
+	spinlock_t queued_lock;
 
 	struct dma_chan *dma;
 	unsigned int align;

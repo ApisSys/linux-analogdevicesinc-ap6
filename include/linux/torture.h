@@ -43,21 +43,19 @@
 
 #define TORTURE_FLAG "-torture:"
 #define TOROUT_STRING(s) \
-	pr_alert("%s" TORTURE_FLAG s "\n", torture_type)
+	pr_alert("%s" TORTURE_FLAG " %s\n", torture_type, s)
 #define VERBOSE_TOROUT_STRING(s) \
 	do { if (verbose) pr_alert("%s" TORTURE_FLAG " %s\n", torture_type, s); } while (0)
 #define VERBOSE_TOROUT_ERRSTRING(s) \
 	do { if (verbose) pr_alert("%s" TORTURE_FLAG "!!! %s\n", torture_type, s); } while (0)
 
-/* Definitions for a non-string torture-test module parameter. */
-#define torture_parm(type, name, init, msg) \
-	static type name = init; \
-	module_param(name, type, 0444); \
-	MODULE_PARM_DESC(name, msg);
-
 /* Definitions for online/offline exerciser. */
+bool torture_offline(int cpu, long *n_onl_attempts, long *n_onl_successes,
+		     unsigned long *sum_offl, int *min_onl, int *max_onl);
+bool torture_online(int cpu, long *n_onl_attempts, long *n_onl_successes,
+		    unsigned long *sum_onl, int *min_onl, int *max_onl);
 int torture_onoff_init(long ooholdoff, long oointerval);
-char *torture_onoff_stats(char *page);
+void torture_onoff_stats(void);
 bool torture_onoff_failures(void);
 
 /* Low-rider random number generator. */
@@ -81,9 +79,10 @@ void stutter_wait(const char *title);
 int torture_stutter_init(int s);
 
 /* Initialization and cleanup. */
-void torture_init_begin(char *ttype, bool v, int *runnable);
+bool torture_init_begin(char *ttype, bool v, int *runnable);
 void torture_init_end(void);
-bool torture_cleanup(void);
+bool torture_cleanup_begin(void);
+void torture_cleanup_end(void);
 bool torture_must_stop(void);
 bool torture_must_stop_irq(void);
 void torture_kthread_stopping(char *title);

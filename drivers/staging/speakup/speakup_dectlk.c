@@ -15,10 +15,6 @@
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
  *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
- *
  * specificly written as a driver for the speakup screenreview
  * s not a general device driver.
  */
@@ -70,24 +66,24 @@ static struct var_t vars[] = {
  * These attributes will appear in /sys/accessibility/speakup/dectlk.
  */
 static struct kobj_attribute caps_start_attribute =
-	__ATTR(caps_start, S_IWUGO|S_IRUGO, spk_var_show, spk_var_store);
+	__ATTR(caps_start, S_IWUSR|S_IRUGO, spk_var_show, spk_var_store);
 static struct kobj_attribute caps_stop_attribute =
-	__ATTR(caps_stop, S_IWUGO|S_IRUGO, spk_var_show, spk_var_store);
+	__ATTR(caps_stop, S_IWUSR|S_IRUGO, spk_var_show, spk_var_store);
 static struct kobj_attribute pitch_attribute =
-	__ATTR(pitch, S_IWUGO|S_IRUGO, spk_var_show, spk_var_store);
+	__ATTR(pitch, S_IWUSR|S_IRUGO, spk_var_show, spk_var_store);
 static struct kobj_attribute punct_attribute =
-	__ATTR(punct, S_IWUGO|S_IRUGO, spk_var_show, spk_var_store);
+	__ATTR(punct, S_IWUSR|S_IRUGO, spk_var_show, spk_var_store);
 static struct kobj_attribute rate_attribute =
-	__ATTR(rate, S_IWUGO|S_IRUGO, spk_var_show, spk_var_store);
+	__ATTR(rate, S_IWUSR|S_IRUGO, spk_var_show, spk_var_store);
 static struct kobj_attribute voice_attribute =
-	__ATTR(voice, S_IWUGO|S_IRUGO, spk_var_show, spk_var_store);
+	__ATTR(voice, S_IWUSR|S_IRUGO, spk_var_show, spk_var_store);
 static struct kobj_attribute vol_attribute =
-	__ATTR(vol, S_IWUGO|S_IRUGO, spk_var_show, spk_var_store);
+	__ATTR(vol, S_IWUSR|S_IRUGO, spk_var_show, spk_var_store);
 
 static struct kobj_attribute delay_time_attribute =
 	__ATTR(delay_time, S_IWUSR|S_IRUGO, spk_var_show, spk_var_store);
 static struct kobj_attribute direct_attribute =
-	__ATTR(direct, S_IWUGO|S_IRUGO, spk_var_show, spk_var_store);
+	__ATTR(direct, S_IWUSR|S_IRUGO, spk_var_show, spk_var_store);
 static struct kobj_attribute full_time_attribute =
 	__ATTR(full_time, S_IWUSR|S_IRUGO, spk_var_show, spk_var_store);
 static struct kobj_attribute jiffy_delta_attribute =
@@ -169,6 +165,7 @@ static u_char lastind;
 static unsigned char get_index(void)
 {
 	u_char rv;
+
 	rv = lastind;
 	lastind = 0;
 	return rv;
@@ -180,6 +177,7 @@ static void read_buff_add(u_char c)
 
 	if (c == 0x01) {
 		unsigned long flags;
+
 		spin_lock_irqsave(&flush_lock, flags);
 		is_flushing = 0;
 		wake_up_interruptible(&flush);
@@ -267,7 +265,7 @@ static void do_catch_up(struct spk_synth *synth)
 		else if (ch <= SPACE) {
 			if (!in_escape && strchr(",.!?;:", last))
 				spk_serial_out(PROCSPEECH);
-			if (jiffies >= jiff_max) {
+			if (time_after_eq(jiffies, jiff_max)) {
 				if (!in_escape)
 					spk_serial_out(PROCSPEECH);
 				spin_lock_irqsave(&speakup_info.spinlock,
@@ -289,10 +287,9 @@ static void do_catch_up(struct spk_synth *synth)
 
 static void synth_flush(struct spk_synth *synth)
 {
-	if (in_escape) {
+	if (in_escape)
 		/* if in command output ']' so we don't get an error */
 		spk_serial_out(']');
-	}
 	in_escape = 0;
 	is_flushing = 1;
 	spk_serial_out(SYNTH_CLEAR);
@@ -304,18 +301,8 @@ module_param_named(start, synth_dectlk.startup, short, S_IRUGO);
 MODULE_PARM_DESC(ser, "Set the serial port for the synthesizer (0-based).");
 MODULE_PARM_DESC(start, "Start the synthesizer once it is loaded.");
 
-static int __init dectlk_init(void)
-{
-	return synth_add(&synth_dectlk);
-}
+module_spk_synth(synth_dectlk);
 
-static void __exit dectlk_exit(void)
-{
-	synth_remove(&synth_dectlk);
-}
-
-module_init(dectlk_init);
-module_exit(dectlk_exit);
 MODULE_AUTHOR("Kirk Reiser <kirk@braille.uwo.ca>");
 MODULE_AUTHOR("David Borowski");
 MODULE_DESCRIPTION("Speakup support for DECtalk Express synthesizers");

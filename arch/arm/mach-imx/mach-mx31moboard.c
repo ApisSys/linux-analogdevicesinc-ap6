@@ -47,6 +47,7 @@
 #include "board-mx31moboard.h"
 #include "common.h"
 #include "devices-imx31.h"
+#include "ehci.h"
 #include "hardware.h"
 #include "iomux-mx3.h"
 #include "ulpi.h"
@@ -434,10 +435,8 @@ static int __init moboard_usbh2_init(void)
 		return -ENODEV;
 
 	pdev = imx31_add_mxc_ehci_hs(2, &usbh2_pdata);
-	if (IS_ERR(pdev))
-		return PTR_ERR(pdev);
 
-	return 0;
+	return PTR_ERR_OR_ZERO(pdev);
 }
 
 static const struct gpio_led mx31moboard_leds[] __initconst = {
@@ -510,7 +509,7 @@ static void mx31moboard_poweroff(void)
 
 	mxc_iomux_mode(MX31_PIN_WATCHDOG_RST__WATCHDOG_RST);
 
-	__raw_writew(1 << 6 | 1 << 2, MX31_IO_ADDRESS(MX31_WDOG_BASE_ADDR));
+	imx_writew(1 << 6 | 1 << 2, MX31_IO_ADDRESS(MX31_WDOG_BASE_ADDR));
 }
 
 static int mx31moboard_baseboard;
@@ -527,11 +526,9 @@ static void __init mx31moboard_init(void)
 		"moboard");
 
 	platform_add_devices(devices, ARRAY_SIZE(devices));
-	gpio_led_register_device(-1, &mx31moboard_led_pdata);
 
 	imx31_add_imx2_wdt();
 
-	moboard_uart0_init();
 	imx31_add_imx_uart0(&uart0_pdata);
 	imx31_add_imx_uart4(&uart4_pdata);
 
@@ -540,6 +537,19 @@ static void __init mx31moboard_init(void)
 
 	imx31_add_spi_imx1(&moboard_spi1_pdata);
 	imx31_add_spi_imx2(&moboard_spi2_pdata);
+
+	mx31moboard_init_cam();
+
+	imx31_add_imx_ssi(0, &moboard_ssi_pdata);
+
+	pm_power_off = mx31moboard_poweroff;
+}
+
+static void __init mx31moboard_late(void)
+{
+	gpio_led_register_device(-1, &mx31moboard_led_pdata);
+
+	moboard_uart0_init();
 
 	gpio_request(IOMUX_TO_GPIO(MX31_PIN_GPIO1_3), "pmic-irq");
 	gpio_direction_input(IOMUX_TO_GPIO(MX31_PIN_GPIO1_3));
@@ -550,17 +560,10 @@ static void __init mx31moboard_init(void)
 
 	imx31_add_mxc_mmc(0, &sdhc1_pdata);
 
-	mx31moboard_init_cam();
-
 	usb_xcvr_reset();
-
 	moboard_usbh2_init();
 
-	imx31_add_imx_ssi(0, &moboard_ssi_pdata);
-
 	imx_add_platform_device("imx_mc13783", 0, NULL, 0, NULL, 0);
-
-	pm_power_off = mx31moboard_poweroff;
 
 	switch (mx31moboard_baseboard) {
 	case MX31NOBOARD:
@@ -600,8 +603,8 @@ MACHINE_START(MX31MOBOARD, "EPFL Mobots mx31moboard")
 	.map_io = mx31_map_io,
 	.init_early = imx31_init_early,
 	.init_irq = mx31_init_irq,
-	.handle_irq = imx31_handle_irq,
 	.init_time	= mx31moboard_timer_init,
 	.init_machine = mx31moboard_init,
+	.init_late	= mx31moboard_late,
 	.restart	= mxc_restart,
 MACHINE_END

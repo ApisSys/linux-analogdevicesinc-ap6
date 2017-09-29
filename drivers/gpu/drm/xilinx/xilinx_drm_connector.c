@@ -45,7 +45,7 @@ static int xilinx_drm_connector_get_modes(struct drm_connector *base_connector)
 		to_xilinx_connector(base_connector);
 	struct drm_encoder *encoder = connector->encoder;
 	struct drm_encoder_slave *encoder_slave = to_encoder_slave(encoder);
-	struct drm_encoder_slave_funcs *encoder_sfuncs =
+	const struct drm_encoder_slave_funcs *encoder_sfuncs =
 		encoder_slave->slave_funcs;
 	int count = 0;
 
@@ -63,7 +63,7 @@ static int xilinx_drm_connector_mode_valid(struct drm_connector *base_connector,
 		to_xilinx_connector(base_connector);
 	struct drm_encoder *encoder = connector->encoder;
 	struct drm_encoder_slave *encoder_slave = to_encoder_slave(encoder);
-	struct drm_encoder_slave_funcs *encoder_sfuncs =
+	const struct drm_encoder_slave_funcs *encoder_sfuncs =
 		encoder_slave->slave_funcs;
 	int ret = MODE_OK;
 
@@ -97,7 +97,7 @@ xilinx_drm_connector_detect(struct drm_connector *base_connector, bool force)
 	enum drm_connector_status status = connector_status_unknown;
 	struct drm_encoder *encoder = connector->encoder;
 	struct drm_encoder_slave *encoder_slave = to_encoder_slave(encoder);
-	struct drm_encoder_slave_funcs *encoder_sfuncs =
+	const struct drm_encoder_slave_funcs *encoder_sfuncs =
 		encoder_slave->slave_funcs;
 
 	if (encoder_sfuncs->detect)
@@ -115,11 +115,11 @@ xilinx_drm_connector_detect(struct drm_connector *base_connector, bool force)
 /* destroy connector */
 void xilinx_drm_connector_destroy(struct drm_connector *base_connector)
 {
-	drm_sysfs_connector_remove(base_connector);
+	drm_connector_unregister(base_connector);
 	drm_connector_cleanup(base_connector);
 }
 
-static struct drm_connector_funcs xilinx_drm_connector_funcs = {
+static const struct drm_connector_funcs xilinx_drm_connector_funcs = {
 	.dpms		= drm_helper_connector_dpms,
 	.fill_modes	= drm_helper_probe_single_connector_modes,
 	.detect		= xilinx_drm_connector_detect,
@@ -134,7 +134,7 @@ static const struct xilinx_drm_connector_type connector_types[] = {
 /* create connector */
 struct drm_connector *
 xilinx_drm_connector_create(struct drm_device *drm,
-			    struct drm_encoder *base_encoder)
+			    struct drm_encoder *base_encoder, int id)
 {
 	struct xilinx_drm_connector *connector;
 	const char *string;
@@ -145,11 +145,12 @@ xilinx_drm_connector_create(struct drm_device *drm,
 	if (!connector)
 		return ERR_PTR(-ENOMEM);
 
-	connector->base.polled = DRM_CONNECTOR_POLL_CONNECT |
+	connector->base.polled = DRM_CONNECTOR_POLL_HPD |
+				 DRM_CONNECTOR_POLL_CONNECT |
 				 DRM_CONNECTOR_POLL_DISCONNECT;
 
-	ret = of_property_read_string(drm->dev->of_node, "xlnx,connector-type",
-				      &string);
+	ret = of_property_read_string_index(drm->dev->of_node,
+					    "xlnx,connector-type", id, &string);
 	if (ret < 0) {
 		dev_err(drm->dev, "No connector type in DT\n");
 		return ERR_PTR(ret);
@@ -176,27 +177,27 @@ xilinx_drm_connector_create(struct drm_device *drm,
 	drm_connector_helper_add(&connector->base,
 				 &xilinx_drm_connector_helper_funcs);
 
-	/* add sysfs entry for connector */
-	ret = drm_sysfs_connector_add(&connector->base);
+	/* add entry for connector */
+	ret = drm_connector_register(&connector->base);
 	if (ret) {
-		DRM_ERROR("failed to add to sysfs\n");
-		goto err_sysfs;
+		DRM_ERROR("failed to register a connector\n");
+		goto err_register;
 	}
 
 	/* connect connector and encoder */
-	connector->base.encoder = base_encoder;
 	ret = drm_mode_connector_attach_encoder(&connector->base, base_encoder);
 	if (ret) {
 		DRM_ERROR("failed to attach connector to encoder\n");
 		goto err_attach;
 	}
 	connector->encoder = base_encoder;
+	connector->base.dpms = DRM_MODE_DPMS_OFF;
 
 	return &connector->base;
 
 err_attach:
-	drm_sysfs_connector_remove(&connector->base);
-err_sysfs:
+	drm_connector_unregister(&connector->base);
+err_register:
 	drm_connector_cleanup(&connector->base);
 	return ERR_PTR(ret);
 }

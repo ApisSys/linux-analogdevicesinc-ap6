@@ -34,6 +34,7 @@
 #define RDMA_USER_CM_H
 
 #include <linux/types.h>
+#include <linux/socket.h>
 #include <linux/in6.h>
 #include <rdma/ib_user_verbs.h>
 #include <rdma/ib_user_sa.h>
@@ -243,12 +244,19 @@ struct rdma_ucm_join_ip_mcast {
 	__u32 id;
 };
 
+/* Multicast join flags */
+enum {
+	RDMA_MC_JOIN_FLAG_FULLMEMBER,
+	RDMA_MC_JOIN_FLAG_SENDONLY_FULLMEMBER,
+	RDMA_MC_JOIN_FLAG_RESERVED,
+};
+
 struct rdma_ucm_join_mcast {
 	__u64 response;		/* rdma_ucma_create_id_resp */
 	__u64 uid;
 	__u32 id;
 	__u16 addr_size;
-	__u16 reserved;
+	__u16 join_flags;
 	struct sockaddr_storage addr;
 };
 

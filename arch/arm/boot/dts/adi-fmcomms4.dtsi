@@ -14,7 +14,7 @@
 		#address-cells = <1>;
 		#size-cells = <0>;
 		#clock-cells = <1>;
-		compatible = "ad9364";
+		compatible = "adi,ad9364";
 
 		/* SPI Setup */
 		reg = <0>;
@@ -27,6 +27,12 @@
 		clock-output-names = "rx_sampl_clk", "tx_sampl_clk";
 
 		/* Digital Interface Control */
+
+		 /* 0 = TUNE RX&TX
+		  * 1 = SKIP TX
+		  * 2 = SKIP ALL
+		  */
+		adi,digital-interface-tune-skip-mode = <0>;
 
 		adi,pp-tx-swap-enable;
 		adi,pp-rx-swap-enable;
@@ -48,7 +54,7 @@
 
 		/* ENSM Mode */
 		adi,frequency-division-duplex-mode-enable;
-		//adi,ensm-pin-pulse-mode-enable;
+		//adi,ensm-enable-pin-pulse-mode-enable;
 		//adi,ensm-enable-txnrx-control-enable;
 
 

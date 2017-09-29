@@ -14,7 +14,7 @@
 		#address-cells = <1>;
 		#size-cells = <0>;
 		#clock-cells = <1>;
-		compatible = "ad9361";
+		compatible = "adi,ad9361";
 
 		/* SPI Setup */
 		reg = <0>;
@@ -26,9 +26,15 @@
 		clock-names = "ad9361_ext_refclk";
 		clock-output-names = "rx_sampl_clk", "tx_sampl_clk";
 
-
 		//adi,debug-mode-enable;
 		/* Digital Interface Control */
+
+		 /* adi,digital-interface-tune-skip-mode:
+		  * 0 = TUNE RX&TX
+		  * 1 = SKIP TX
+		  * 2 = SKIP ALL
+		  */
+		adi,digital-interface-tune-skip-mode = <0>;
 
 		adi,pp-tx-swap-enable;
 		adi,pp-rx-swap-enable;
@@ -51,7 +57,7 @@
 
 		/* ENSM Mode */
 		adi,frequency-division-duplex-mode-enable;
-		//adi,ensm-pin-pulse-mode-enable;
+		//adi,ensm-enable-pin-pulse-mode-enable;
 		//adi,ensm-enable-txnrx-control-enable;
 
 
@@ -90,6 +96,8 @@
 		adi,tx-path-clock-frequencies = <983040000 122880000 122880000 61440000 30720000 30720000>;
 
 		/* Gain Control */
+
+		//adi,gaintable-name = "ad9361_std_gaintable";
 
 		/* adi,gc-rx[1|2]-mode:
 		 * 0 = RF_GAIN_MGC

@@ -165,7 +165,8 @@ static struct ad7791_state *ad_sigma_delta_to_ad7791(struct ad_sigma_delta *sd)
 	return container_of(sd, struct ad7791_state, sd);
 }
 
-static int ad7791_set_channel(struct ad_sigma_delta *sd, unsigned int channel)
+static int ad7791_set_channel(struct ad_sigma_delta *sd, unsigned int slot,
+	unsigned int channel)
 {
 	ad_sd_set_comm(sd, channel);
 
@@ -279,30 +280,22 @@ static ssize_t ad7791_write_frequency(struct device *dev,
 	struct ad7791_state *st = iio_priv(indio_dev);
 	int i, ret;
 
-	mutex_lock(&indio_dev->mlock);
-	if (iio_buffer_enabled(indio_dev)) {
-		mutex_unlock(&indio_dev->mlock);
-		return -EBUSY;
-	}
-	mutex_unlock(&indio_dev->mlock);
-
-	ret = -EINVAL;
-
-	for (i = 0; i < ARRAY_SIZE(ad7791_sample_freq_avail); i++) {
-		if (sysfs_streq(ad7791_sample_freq_avail[i], buf)) {
-
-			mutex_lock(&indio_dev->mlock);
-			st->filter &= ~AD7791_FILTER_RATE_MASK;
-			st->filter |= i;
-			ad_sd_write_reg(&st->sd, AD7791_REG_FILTER,
-					 sizeof(st->filter), st->filter);
-			mutex_unlock(&indio_dev->mlock);
-			ret = 0;
+	for (i = 0; i < ARRAY_SIZE(ad7791_sample_freq_avail); i++)
+		if (sysfs_streq(ad7791_sample_freq_avail[i], buf))
 			break;
-		}
-	}
+	if (i == ARRAY_SIZE(ad7791_sample_freq_avail))
+		return -EINVAL;
 
-	return ret ? ret : len;
+	ret = iio_device_claim_direct_mode(indio_dev);
+	if (ret)
+		return ret;
+	st->filter &= ~AD7791_FILTER_RATE_MASK;
+	st->filter |= i;
+	ad_sd_write_reg(&st->sd, AD7791_REG_FILTER, sizeof(st->filter),
+			st->filter);
+	iio_device_release_direct_mode(indio_dev);
+
+	return len;
 }
 
 static IIO_DEV_ATTR_SAMP_FREQ(S_IWUSR | S_IRUGO,
@@ -337,12 +330,20 @@ static const struct iio_info ad7791_no_filter_info = {
 static int ad7791_setup(struct ad7791_state *st,
 			struct ad7791_platform_data *pdata)
 {
+	int ret;
+
 	/* Set to poweron-reset default values */
 	st->mode = AD7791_MODE_BUFFER;
 	st->filter = AD7791_FILTER_RATE_16_6;
 
 	if (!pdata)
 		return 0;
+	/* reset the serial interface */
+	ret = -1;
+	ret = spi_write(st->sd.spi, (u8 *)&ret, sizeof(ret));
+	if (ret < 0)
+		return ret;
+	usleep_range(500, 2000); /* Wait for at least 500us */
 
 	if ((st->info->flags & AD7791_FLAG_HAS_BUFFER) && !pdata->buffered)
 		st->mode &= ~AD7791_MODE_BUFFER;
@@ -373,7 +374,7 @@ static struct ad7791_platform_data *ad7791_parse_dt(struct device *dev)
 	pdata->buffered = of_property_read_bool(np, "adi,buffered-mode-enable");
 	pdata->burnout_current = of_property_read_bool(np, "adi,burnout-current-enable");
 	pdata->unipolar = of_property_read_bool(np, "adi,unipolar-mode-enable");
-	
+
 	return pdata;
 }
 #else
@@ -395,12 +396,12 @@ static int ad7791_probe(struct spi_device *spi)
 		pdata = ad7791_parse_dt(&spi->dev);
 	else
 		pdata = spi->dev.platform_data;
-	
+
 	if (!pdata) {
 		dev_err(&spi->dev, "no platform data? using default\n");
 		pdata = &ad7791_default_pdata;
 	}
-	
+
 	if (!spi->irq) {
 		dev_err(&spi->dev, "Missing IRQ.\n");
 		return -ENXIO;
@@ -426,6 +427,7 @@ static int ad7791_probe(struct spi_device *spi)
 	spi_set_drvdata(spi, indio_dev);
 
 	indio_dev->dev.parent = &spi->dev;
+	indio_dev->dev.of_node = spi->dev.of_node;
 	indio_dev->name = spi_get_device_id(spi)->name;
 	indio_dev->modes = INDIO_DIRECT_MODE;
 	indio_dev->channels = st->info->channels;
@@ -483,7 +485,6 @@ MODULE_DEVICE_TABLE(spi, ad7791_spi_ids);
 static struct spi_driver ad7791_driver = {
 	.driver = {
 		.name	= "ad7791",
-		.owner	= THIS_MODULE,
 	},
 	.probe		= ad7791_probe,
 	.remove		= ad7791_remove,

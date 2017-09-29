@@ -30,7 +30,7 @@
 			label = "BP1";
 			gpios = <&gpio3 25 GPIO_ACTIVE_LOW>;
 			linux,code = <BTN_MISC>;
-			gpio-key,wakeup;
+			wakeup-source;
 			linux,input-type = <1>;
 		};
 	};
@@ -45,6 +45,14 @@
 			gpios = <&gpio3 29 GPIO_ACTIVE_LOW>;
 			linux,default-trigger = "heartbeat";
 		};
+	};
+
+	sound {
+		compatible = "eukrea,asoc-tlv320";
+		eukrea,model = "imx35-eukrea-tlv320aic23";
+		ssi-controller = <&ssi1>;
+		fsl,mux-int-port = <1>;
+		fsl,mux-ext-port = <4>;
 	};
 };
 
@@ -124,20 +132,33 @@
 };
 
 &ssi1 {
-	fsl,mode = "i2s-slave";
+	codec-handle = <&tlv320aic23>;
 	status = "okay";
 };
 
 &uart1 {
 	pinctrl-names = "default";
 	pinctrl-0 = <&pinctrl_uart1>;
-	fsl,uart-has-rtscts;
+	uart-has-rtscts;
 	status = "okay";
 };
 
 &uart2 {
 	pinctrl-names = "default";
 	pinctrl-0 = <&pinctrl_uart2>;
-	fsl,uart-has-rtscts;
+	uart-has-rtscts;
+	status = "okay";
+};
+
+&usbhost1 {
+	phy_type = "serial";
+	dr_mode = "host";
+	status = "okay";
+};
+
+&usbotg {
+	phy_type = "utmi";
+	dr_mode = "otg";
+	external-vbus-divider;
 	status = "okay";
 };

@@ -133,7 +133,6 @@ MODULE_VERSION(DRV_VERSION "-" DRV_BUILD_ID);
 #define SKD_TIMER_MINUTES(minutes) ((minutes) * (60))
 
 #define INQ_STD_NBYTES 36
-#define SKD_DISCARD_CDB_LENGTH	24
 
 enum skd_drvr_state {
 	SKD_DRVR_STATE_LOAD,
@@ -212,7 +211,6 @@ struct skd_request_context {
 
 	struct request *req;
 	u8 flush_cmd;
-	u8 discard_page;
 
 	u32 timeout_stamp;
 	u8 sg_data_dir;
@@ -230,7 +228,6 @@ struct skd_request_context {
 };
 #define SKD_DATA_DIR_HOST_TO_CARD       1
 #define SKD_DATA_DIR_CARD_TO_HOST       2
-#define SKD_DATA_DIR_NONE		3	/* especially for DISCARD requests. */
 
 struct skd_special_context {
 	struct skd_request_context req;
@@ -540,32 +537,6 @@ skd_prep_zerosize_flush_cdb(struct skd_scsi_request *scsi_req,
 	scsi_req->cdb[9] = 0;
 }
 
-static void
-skd_prep_discard_cdb(struct skd_scsi_request *scsi_req,
-		     struct skd_request_context *skreq,
-		     struct page *page,
-		     u32 lba, u32 count)
-{
-	char *buf;
-	unsigned long len;
-	struct request *req;
-
-	buf = page_address(page);
-	len = SKD_DISCARD_CDB_LENGTH;
-
-	scsi_req->cdb[0] = UNMAP;
-	scsi_req->cdb[8] = len;
-
-	put_unaligned_be16(6 + 16, &buf[0]);
-	put_unaligned_be16(16, &buf[2]);
-	put_unaligned_be64(lba, &buf[8]);
-	put_unaligned_be32(count, &buf[16]);
-
-	req = skreq->req;
-	blk_add_request_payload(req, page, len);
-	req->buffer = buf;
-}
-
 static void skd_request_fn_not_online(struct request_queue *q);
 
 static void skd_request_fn(struct request_queue *q)
@@ -576,7 +547,6 @@ static void skd_request_fn(struct request_queue *q)
 	struct skd_request_context *skreq;
 	struct request *req = NULL;
 	struct skd_scsi_request *scsi_req;
-	struct page *page;
 	unsigned long io_flags;
 	int error;
 	u32 lba;
@@ -627,7 +597,7 @@ static void skd_request_fn(struct request_queue *q)
 		data_dir = rq_data_dir(req);
 		io_flags = req->cmd_flags;
 
-		if (io_flags & REQ_FLUSH)
+		if (req_op(req) == REQ_OP_FLUSH)
 			flush++;
 
 		if (io_flags & REQ_FUA)
@@ -670,7 +640,6 @@ static void skd_request_fn(struct request_queue *q)
 		skreq->flush_cmd = 0;
 		skreq->n_sg = 0;
 		skreq->sg_byte_count = 0;
-		skreq->discard_page = 0;
 
 		/*
 		 * OK to now dequeue request from q.
@@ -736,17 +705,7 @@ static void skd_request_fn(struct request_queue *q)
 		else
 			skreq->sg_data_dir = SKD_DATA_DIR_HOST_TO_CARD;
 
-		if (io_flags & REQ_DISCARD) {
-			page = alloc_page(GFP_ATOMIC | __GFP_ZERO);
-			if (!page) {
-				pr_err("request_fn:Page allocation failed.\n");
-				skd_end_request(skdev, skreq, -ENOMEM);
-				break;
-			}
-			skreq->discard_page = 1;
-			skd_prep_discard_cdb(scsi_req, skreq, page, lba, count);
-
-		} else if (flush == SKD_FLUSH_ZERO_SIZE_FIRST) {
+		if (flush == SKD_FLUSH_ZERO_SIZE_FIRST) {
 			skd_prep_zerosize_flush_cdb(scsi_req, skreq);
 			SKD_ASSERT(skreq->flush_cmd == 1);
 
@@ -851,17 +810,6 @@ skip_sg:
 static void skd_end_request(struct skd_device *skdev,
 			    struct skd_request_context *skreq, int error)
 {
-	struct request *req = skreq->req;
-	unsigned int io_flags = req->cmd_flags;
-
-	if ((io_flags & REQ_DISCARD) &&
-		(skreq->discard_page == 1)) {
-		pr_debug("%s:%s:%d, free the page!",
-			 skdev->name, __func__, __LINE__);
-		free_page((unsigned long)req->buffer);
-		req->buffer = NULL;
-	}
-
 	if (unlikely(error)) {
 		struct request *req = skreq->req;
 		char *cmd = (rq_data_dir(req) == READ) ? "read" : "write";
@@ -3945,15 +3893,14 @@ static int skd_acquire_msix(struct skd_device *skdev)
 	for (i = 0; i < SKD_MAX_MSIX_COUNT; i++)
 		entries[i].entry = i;
 
-	rc = pci_enable_msix_range(pdev, entries,
-				   SKD_MIN_MSIX_COUNT, SKD_MAX_MSIX_COUNT);
-	if (rc < 0) {
+	rc = pci_enable_msix_exact(pdev, entries, SKD_MAX_MSIX_COUNT);
+	if (rc) {
 		pr_err("(%s): failed to enable MSI-X %d\n",
 		       skd_name(skdev), rc);
 		goto msix_out;
 	}
 
-	skdev->msix_count = rc;
+	skdev->msix_count = SKD_MAX_MSIX_COUNT;
 	skdev->msix_entries = kzalloc(sizeof(struct skd_msix_entry) *
 				      skdev->msix_count, GFP_KERNEL);
 	if (!skdev->msix_entries) {
@@ -4114,15 +4061,13 @@ static int skd_cons_skcomp(struct skd_device *skdev)
 		 skdev->name, __func__, __LINE__,
 		 nbytes, SKD_N_COMPLETION_ENTRY);
 
-	skcomp = pci_alloc_consistent(skdev->pdev, nbytes,
-				      &skdev->cq_dma_address);
+	skcomp = pci_zalloc_consistent(skdev->pdev, nbytes,
+				       &skdev->cq_dma_address);
 
 	if (skcomp == NULL) {
 		rc = -ENOMEM;
 		goto err_out;
 	}
-
-	memset(skcomp, 0, nbytes);
 
 	skdev->skcomp_table = skcomp;
 	skdev->skerr_table = (struct fit_comp_error_info *)((char *)skcomp +
@@ -4306,14 +4251,13 @@ static int skd_cons_skspcl(struct skd_device *skdev)
 
 		nbytes = SKD_N_SPECIAL_FITMSG_BYTES;
 
-		skspcl->msg_buf = pci_alloc_consistent(skdev->pdev, nbytes,
-						       &skspcl->mb_dma_address);
+		skspcl->msg_buf =
+			pci_zalloc_consistent(skdev->pdev, nbytes,
+					      &skspcl->mb_dma_address);
 		if (skspcl->msg_buf == NULL) {
 			rc = -ENOMEM;
 			goto err_out;
 		}
-
-		memset(skspcl->msg_buf, 0, nbytes);
 
 		skspcl->req.sg = kzalloc(sizeof(struct scatterlist) *
 					 SKD_N_SG_PER_SPECIAL, GFP_KERNEL);
@@ -4355,24 +4299,20 @@ static int skd_cons_sksb(struct skd_device *skdev)
 
 	nbytes = SKD_N_INTERNAL_BYTES;
 
-	skspcl->data_buf = pci_alloc_consistent(skdev->pdev, nbytes,
-						&skspcl->db_dma_address);
+	skspcl->data_buf = pci_zalloc_consistent(skdev->pdev, nbytes,
+						 &skspcl->db_dma_address);
 	if (skspcl->data_buf == NULL) {
 		rc = -ENOMEM;
 		goto err_out;
 	}
 
-	memset(skspcl->data_buf, 0, nbytes);
-
 	nbytes = SKD_N_SPECIAL_FITMSG_BYTES;
-	skspcl->msg_buf = pci_alloc_consistent(skdev->pdev, nbytes,
-					       &skspcl->mb_dma_address);
+	skspcl->msg_buf = pci_zalloc_consistent(skdev->pdev, nbytes,
+						&skspcl->mb_dma_address);
 	if (skspcl->msg_buf == NULL) {
 		rc = -ENOMEM;
 		goto err_out;
 	}
-
-	memset(skspcl->msg_buf, 0, nbytes);
 
 	skspcl->req.sksg_list = skd_cons_sg_list(skdev, 1,
 						 &skspcl->req.sksg_dma_address);
@@ -4421,20 +4361,15 @@ static int skd_cons_disk(struct skd_device *skdev)
 	disk->queue = q;
 	q->queuedata = skdev;
 
-	blk_queue_flush(q, REQ_FLUSH | REQ_FUA);
+	blk_queue_write_cache(q, true, true);
 	blk_queue_max_segments(q, skdev->sgs_per_request);
 	blk_queue_max_hw_sectors(q, SKD_N_MAX_SECTORS);
 
 	/* set sysfs ptimal_io_size to 8K */
 	blk_queue_io_opt(q, 8192);
 
-	/* DISCARD Flag initialization. */
-	q->limits.discard_granularity = 8192;
-	q->limits.discard_alignment = 0;
-	q->limits.max_discard_sectors = UINT_MAX >> 9;
-	q->limits.discard_zeroes_data = 1;
-	queue_flag_set_unlocked(QUEUE_FLAG_DISCARD, q);
 	queue_flag_set_unlocked(QUEUE_FLAG_NONROT, q);
+	queue_flag_clear_unlocked(QUEUE_FLAG_ADD_RANDOM, q);
 
 	spin_lock_irqsave(&skdev->lock, flags);
 	pr_debug("%s:%s:%d stopping %s queue\n",
@@ -4755,10 +4690,10 @@ static int skd_bdev_getgeo(struct block_device *bdev, struct hd_geometry *geo)
 	return -EIO;
 }
 
-static int skd_bdev_attach(struct skd_device *skdev)
+static int skd_bdev_attach(struct device *parent, struct skd_device *skdev)
 {
 	pr_debug("%s:%s:%d add_disk\n", skdev->name, __func__, __LINE__);
-	add_disk(skdev->disk);
+	device_add_disk(parent, skdev->disk);
 	return 0;
 }
 
@@ -4775,7 +4710,7 @@ static const struct block_device_operations skd_blockdev_ops = {
  *****************************************************************************
  */
 
-static DEFINE_PCI_DEVICE_TABLE(skd_pci_tbl) = {
+static const struct pci_device_id skd_pci_tbl[] = {
 	{ PCI_VENDOR_ID_STEC, PCI_DEVICE_ID_S1120,
 	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, },
 	{ 0 }                     /* terminate list */
@@ -4877,8 +4812,6 @@ static int skd_pci_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 
 	pci_set_drvdata(pdev, skdev);
 
-	skdev->disk->driverfs_dev = &pdev->dev;
-
 	for (i = 0; i < SKD_MAX_BARS; i++) {
 		skdev->mem_phys[i] = pci_resource_start(pdev, i);
 		skdev->mem_size[i] = (u32)pci_resource_len(pdev, i);
@@ -4916,7 +4849,7 @@ static int skd_pci_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 					      (SKD_START_WAIT_SECONDS * HZ));
 	if (skdev->gendisk_on > 0) {
 		/* device came on-line after reset */
-		skd_bdev_attach(skdev);
+		skd_bdev_attach(&pdev->dev, skdev);
 		rc = 0;
 	} else {
 		/* we timed out, something is wrong with the device,

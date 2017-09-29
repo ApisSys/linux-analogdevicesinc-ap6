@@ -48,6 +48,7 @@ int xylon_drm_crtc_get_param(struct drm_crtc *base_crtc, unsigned int *p,
 			     enum xylon_drm_crtc_buff param);
 
 struct drm_crtc *xylon_drm_crtc_create(struct drm_device *dev);
-void xylon_drm_crtc_destroy(struct drm_crtc *base_crtc);
+
+void xylon_drm_crtc_properties_restore(struct drm_crtc *base_crtc);
 
 #endif /* _XYLON_DRM_CRTC_H_ */

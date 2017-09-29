@@ -28,10 +28,6 @@
 #include <linux/pci.h>
 #include <asm/io.h>
 
-#ifdef CONFIG_PPC64
-#include <asm/pci-bridge.h>
-#endif
-
 #ifdef CONFIG_PPC32
 #include <asm/bootx.h>
 #endif
@@ -91,15 +87,6 @@ extern boot_infos_t *boot_infos;
 #define AVIVO_DC_LUTB_WHITE_OFFSET_GREEN        0x6cd4
 #define AVIVO_DC_LUTB_WHITE_OFFSET_RED          0x6cd8
 
-#define FB_RIGHT_POS(p, bpp)         (fb_be_math(p) ? 0 : (32 - (bpp)))
-
-static inline u32 offb_cmap_byteswap(struct fb_info *info, u32 value)
-{
-	u32 bpp = info->var.bits_per_pixel;
-
-	return cpu_to_be32(value) >> FB_RIGHT_POS(info, bpp);
-}
-
     /*
      *  Set a single color register. The values supplied are already
      *  rounded down to the hardware's capabilities (according to the
@@ -129,7 +116,7 @@ static int offb_setcolreg(u_int regno, u_int red, u_int green, u_int blue,
 			mask <<= info->var.transp.offset;
 			value |= mask;
 		}
-		pal[regno] = offb_cmap_byteswap(info, value);
+		pal[regno] = value;
 		return 0;
 	}
 
@@ -638,6 +625,21 @@ static void __init offb_init_nodriver(struct device_node *dp, int no_real_node)
 	if (address == OF_BAD_ADDR && addr_prop)
 		address = (u64)addr_prop;
 	if (address != OF_BAD_ADDR) {
+#ifdef CONFIG_PCI
+		const __be32 *vidp, *didp;
+		u32 vid, did;
+		struct pci_dev *pdev;
+
+		vidp = of_get_property(dp, "vendor-id", NULL);
+		didp = of_get_property(dp, "device-id", NULL);
+		if (vidp && didp) {
+			vid = be32_to_cpup(vidp);
+			did = be32_to_cpup(didp);
+			pdev = pci_get_device(vid, did, NULL);
+			if (!pdev || pci_enable_device(pdev))
+				return;
+		}
+#endif
 		/* kludge for valkyrie */
 		if (strcmp(dp->name, "valkyrie") == 0)
 			address += 0x1000;

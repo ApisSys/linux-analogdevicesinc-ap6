@@ -15,48 +15,73 @@
 static inline int init_new_context(struct task_struct *tsk,
 				   struct mm_struct *mm)
 {
+	spin_lock_init(&mm->context.pgtable_lock);
+	INIT_LIST_HEAD(&mm->context.pgtable_list);
+	spin_lock_init(&mm->context.gmap_lock);
+	INIT_LIST_HEAD(&mm->context.gmap_list);
 	cpumask_clear(&mm->context.cpu_attach_mask);
-	atomic_set(&mm->context.attach_count, 0);
+	atomic_set(&mm->context.flush_count, 0);
+	mm->context.gmap_asce = 0;
 	mm->context.flush_mm = 0;
-	mm->context.asce_bits = _ASCE_TABLE_LENGTH | _ASCE_USER_BITS;
-#ifdef CONFIG_64BIT
-	mm->context.asce_bits |= _ASCE_TYPE_REGION3;
-#endif
+#ifdef CONFIG_PGSTE
+	mm->context.alloc_pgste = page_table_allocate_pgste;
 	mm->context.has_pgste = 0;
-	mm->context.asce_limit = STACK_TOP_MAX;
+	mm->context.use_skey = 0;
+#endif
+	switch (mm->context.asce_limit) {
+	case 1UL << 42:
+		/*
+		 * forked 3-level task, fall through to set new asce with new
+		 * mm->pgd
+		 */
+	case 0:
+		/* context created by exec, set asce limit to 4TB */
+		mm->context.asce_limit = STACK_TOP_MAX;
+		mm->context.asce = __pa(mm->pgd) | _ASCE_TABLE_LENGTH |
+				   _ASCE_USER_BITS | _ASCE_TYPE_REGION3;
+		break;
+	case 1UL << 53:
+		/* forked 4-level task, set new asce with new mm->pgd */
+		mm->context.asce = __pa(mm->pgd) | _ASCE_TABLE_LENGTH |
+				   _ASCE_USER_BITS | _ASCE_TYPE_REGION2;
+		break;
+	case 1UL << 31:
+		/* forked 2-level compat task, set new asce with new mm->pgd */
+		mm->context.asce = __pa(mm->pgd) | _ASCE_TABLE_LENGTH |
+				   _ASCE_USER_BITS | _ASCE_TYPE_SEGMENT;
+		/* pgd_alloc() did not increase mm->nr_pmds */
+		mm_inc_nr_pmds(mm);
+	}
 	crst_table_init((unsigned long *) mm->pgd, pgd_entry_type(mm));
 	return 0;
 }
 
 #define destroy_context(mm)             do { } while (0)
 
-static inline void update_user_asce(struct mm_struct *mm, int load_primary)
+static inline void set_user_asce(struct mm_struct *mm)
 {
-	pgd_t *pgd = mm->pgd;
-
-	S390_lowcore.user_asce = mm->context.asce_bits | __pa(pgd);
-	if (load_primary)
-		__ctl_load(S390_lowcore.user_asce, 1, 1);
-	set_fs(current->thread.mm_segment);
+	S390_lowcore.user_asce = mm->context.asce;
+	if (current->thread.mm_segment.ar4)
+		__ctl_load(S390_lowcore.user_asce, 7, 7);
+	set_cpu_flag(CIF_ASCE);
 }
 
-static inline void clear_user_asce(struct mm_struct *mm, int load_primary)
+static inline void clear_user_asce(void)
 {
 	S390_lowcore.user_asce = S390_lowcore.kernel_asce;
 
-	if (load_primary)
-		__ctl_load(S390_lowcore.user_asce, 1, 1);
+	__ctl_load(S390_lowcore.user_asce, 1, 1);
 	__ctl_load(S390_lowcore.user_asce, 7, 7);
 }
 
-static inline void update_primary_asce(struct task_struct *tsk)
+static inline void load_kernel_asce(void)
 {
 	unsigned long asce;
 
 	__ctl_store(asce, 1, 1);
 	if (asce != S390_lowcore.kernel_asce)
 		__ctl_load(S390_lowcore.kernel_asce, 1, 1);
-	set_tsk_thread_flag(tsk, TIF_ASCE);
+	set_cpu_flag(CIF_ASCE);
 }
 
 static inline void switch_mm(struct mm_struct *prev, struct mm_struct *next,
@@ -64,27 +89,15 @@ static inline void switch_mm(struct mm_struct *prev, struct mm_struct *next,
 {
 	int cpu = smp_processor_id();
 
-	update_primary_asce(tsk);
+	S390_lowcore.user_asce = next->context.asce;
 	if (prev == next)
 		return;
-	if (MACHINE_HAS_TLB_LC)
-		cpumask_set_cpu(cpu, &next->context.cpu_attach_mask);
-	if (atomic_inc_return(&next->context.attach_count) >> 16) {
-		/* Delay update_user_asce until all TLB flushes are done. */
-		set_tsk_thread_flag(tsk, TIF_TLB_WAIT);
-		/* Clear old ASCE by loading the kernel ASCE. */
-		clear_user_asce(next, 0);
-	} else {
-		cpumask_set_cpu(cpu, mm_cpumask(next));
-		update_user_asce(next, 0);
-		if (next->context.flush_mm)
-			/* Flush pending TLBs */
-			__tlb_flush_mm(next);
-	}
-	atomic_dec(&prev->context.attach_count);
-	WARN_ON(atomic_read(&prev->context.attach_count) < 0);
-	if (MACHINE_HAS_TLB_LC)
-		cpumask_clear_cpu(cpu, &prev->context.cpu_attach_mask);
+	cpumask_set_cpu(cpu, &next->context.cpu_attach_mask);
+	cpumask_set_cpu(cpu, mm_cpumask(next));
+	/* Clear old ASCE by loading the kernel ASCE. */
+	__ctl_load(S390_lowcore.kernel_asce, 1, 1);
+	__ctl_load(S390_lowcore.kernel_asce, 7, 7);
+	cpumask_clear_cpu(cpu, &prev->context.cpu_attach_mask);
 }
 
 #define finish_arch_post_lock_switch finish_arch_post_lock_switch
@@ -93,18 +106,17 @@ static inline void finish_arch_post_lock_switch(void)
 	struct task_struct *tsk = current;
 	struct mm_struct *mm = tsk->mm;
 
-	if (!test_tsk_thread_flag(tsk, TIF_TLB_WAIT))
-		return;
-	preempt_disable();
-	clear_tsk_thread_flag(tsk, TIF_TLB_WAIT);
-	while (atomic_read(&mm->context.attach_count) >> 16)
-		cpu_relax();
+	load_kernel_asce();
+	if (mm) {
+		preempt_disable();
+		while (atomic_read(&mm->context.flush_count))
+			cpu_relax();
 
-	cpumask_set_cpu(smp_processor_id(), mm_cpumask(mm));
-	update_user_asce(mm, 0);
-	if (mm->context.flush_mm)
-		__tlb_flush_mm(mm);
-	preempt_enable();
+		if (mm->context.flush_mm)
+			__tlb_flush_mm(mm);
+		preempt_enable();
+	}
+	set_fs(current->thread.mm_segment);
 }
 
 #define enter_lazy_tlb(mm,tsk)	do { } while (0)
@@ -113,20 +125,40 @@ static inline void finish_arch_post_lock_switch(void)
 static inline void activate_mm(struct mm_struct *prev,
                                struct mm_struct *next)
 {
-        switch_mm(prev, next, current);
+	switch_mm(prev, next, current);
+	set_user_asce(next);
 }
 
 static inline void arch_dup_mmap(struct mm_struct *oldmm,
 				 struct mm_struct *mm)
 {
-#ifdef CONFIG_64BIT
-	if (oldmm->context.asce_limit < mm->context.asce_limit)
-		crst_table_downgrade(mm, oldmm->context.asce_limit);
-#endif
 }
 
 static inline void arch_exit_mmap(struct mm_struct *mm)
 {
 }
 
+static inline void arch_unmap(struct mm_struct *mm,
+			struct vm_area_struct *vma,
+			unsigned long start, unsigned long end)
+{
+}
+
+static inline void arch_bprm_mm_init(struct mm_struct *mm,
+				     struct vm_area_struct *vma)
+{
+}
+
+static inline bool arch_vma_access_permitted(struct vm_area_struct *vma,
+		bool write, bool execute, bool foreign)
+{
+	/* by default, allow everything */
+	return true;
+}
+
+static inline bool arch_pte_access_permitted(pte_t pte, bool write)
+{
+	/* by default, allow everything */
+	return true;
+}
 #endif /* __S390_MMU_CONTEXT_H */

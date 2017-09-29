@@ -40,28 +40,33 @@ int adis_write_reg(struct adis *adis, unsigned int reg,
 			.len = 2,
 			.cs_change = 1,
 			.delay_usecs = adis->data->write_delay,
+			.cs_change_stall_delay_us = adis->data->stall_delay,
 		}, {
 			.tx_buf = adis->tx + 2,
 			.bits_per_word = 8,
 			.len = 2,
 			.cs_change = 1,
 			.delay_usecs = adis->data->write_delay,
+			.cs_change_stall_delay_us = adis->data->stall_delay,
 		}, {
 			.tx_buf = adis->tx + 4,
 			.bits_per_word = 8,
 			.len = 2,
 			.cs_change = 1,
 			.delay_usecs = adis->data->write_delay,
+			.cs_change_stall_delay_us = adis->data->stall_delay,
 		}, {
 			.tx_buf = adis->tx + 6,
 			.bits_per_word = 8,
 			.len = 2,
 			.delay_usecs = adis->data->write_delay,
+			.cs_change_stall_delay_us = adis->data->stall_delay,
 		}, {
 			.tx_buf = adis->tx + 8,
 			.bits_per_word = 8,
 			.len = 2,
 			.delay_usecs = adis->data->write_delay,
+			.cs_change_stall_delay_us = adis->data->stall_delay,
 		},
 	};
 
@@ -132,12 +137,14 @@ int adis_read_reg(struct adis *adis, unsigned int reg,
 			.len = 2,
 			.cs_change = 1,
 			.delay_usecs = adis->data->write_delay,
+			.cs_change_stall_delay_us = adis->data->stall_delay,
 		}, {
 			.tx_buf = adis->tx + 2,
 			.bits_per_word = 8,
 			.len = 2,
 			.cs_change = 1,
 			.delay_usecs = adis->data->read_delay,
+			.cs_change_stall_delay_us = adis->data->stall_delay,
 		}, {
 			.tx_buf = adis->tx + 4,
 			.rx_buf = adis->rx,
@@ -145,11 +152,13 @@ int adis_read_reg(struct adis *adis, unsigned int reg,
 			.len = 2,
 			.cs_change = 1,
 			.delay_usecs = adis->data->read_delay,
+			.cs_change_stall_delay_us = adis->data->stall_delay,
 		}, {
 			.rx_buf = adis->rx + 2,
 			.bits_per_word = 8,
 			.len = 2,
 			.delay_usecs = adis->data->read_delay,
+			.cs_change_stall_delay_us = adis->data->stall_delay,
 		},
 	};
 
@@ -324,7 +333,12 @@ static int adis_self_test(struct adis *adis)
 
 	msleep(adis->data->startup_delay);
 
-	return adis_check_status(adis);
+	ret = adis_check_status(adis);
+
+	if (adis->data->self_test_no_autoclear)
+		adis_write_reg_16(adis, adis->data->msc_ctrl_reg, 0x00);
+
+	return ret;
 }
 
 /**

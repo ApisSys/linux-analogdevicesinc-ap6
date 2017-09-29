@@ -93,16 +93,14 @@ static int spi_xcomm_gpio_add(struct spi_xcomm *spi_xcomm)
 	spi_xcomm->gc.ngpio = 1;
 	spi_xcomm->gc.label = "SPI-XCOMM-GPIO";
 	spi_xcomm->gc.owner = THIS_MODULE;
-	spi_xcomm->gc.dev = &spi_xcomm->i2c->dev;
+	spi_xcomm->gc.parent = &spi_xcomm->i2c->dev;
 
 	return gpiochip_add(&spi_xcomm->gc);
 }
 
 static void spi_xcomm_gpio_remove(struct spi_xcomm *spi_xcomm)
 {
-	int ret = gpiochip_remove(&spi_xcomm->gc);
-	if (ret)
-		dev_err(&spi_xcomm->i2c->dev, "failed to remove gpio\n");
+	gpiochip_remove(&spi_xcomm->gc);
 }
 #else
 static inline int spi_xcomm_gpio_add(struct spi_xcomm *spi_xcomm)
@@ -327,11 +325,11 @@ static const struct i2c_device_id spi_xcomm_ids[] = {
 	{ "spi-xcomm" },
 	{ },
 };
+MODULE_DEVICE_TABLE(i2c, spi_xcomm_ids);
 
 static struct i2c_driver spi_xcomm_driver = {
 	.driver = {
 		.name	= "spi-xcomm",
-		.owner	= THIS_MODULE,
 	},
 	.id_table	= spi_xcomm_ids,
 	.probe		= spi_xcomm_probe,

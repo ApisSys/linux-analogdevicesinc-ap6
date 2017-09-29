@@ -32,10 +32,8 @@
 #include "xylon_property.h"
 
 struct xylon_drm_plane_properties {
-	struct drm_property *control;
 	struct drm_property *color_transparency;
 	struct drm_property *interlace;
-	struct drm_property *pixel_format;
 	struct drm_property *transparency;
 	struct drm_property *transparent_color;
 };
@@ -45,12 +43,9 @@ struct xylon_drm_plane {
 	struct xylon_drm_plane_manager *manager;
 	struct xylon_drm_plane_properties properties;
 	dma_addr_t paddr;
-	u32 format;
 	u32 x;
 	u32 y;
-	unsigned int bpp;
-	int id;
-	bool priv;
+	unsigned int id;
 };
 
 struct xylon_drm_plane_manager {
@@ -77,20 +72,15 @@ xylon_drm_plane_set_parameters(struct xylon_drm_plane *plane,
 
 void xylon_drm_plane_dpms(struct drm_plane *base_plane, int dpms)
 {
-	struct drm_mode_object *obj = &base_plane->base;
 	struct xylon_drm_plane *plane = to_xylon_plane(base_plane);
 	struct xylon_drm_plane_manager *manager = plane->manager;
 
 	switch (dpms) {
 	case DRM_MODE_DPMS_ON:
 		xylon_cvc_layer_enable(manager->cvc, plane->id);
-		drm_object_property_set_value(obj, plane->properties.control,
-					      1);
 		break;
 	default:
 		xylon_cvc_layer_disable(manager->cvc, plane->id);
-		drm_object_property_set_value(obj, plane->properties.control,
-					      0);
 		break;
 	}
 }
@@ -117,9 +107,9 @@ int xylon_drm_plane_fb_set(struct drm_plane *base_plane,
 	int id = plane->id;
 	int ret;
 
-	if (fb->pixel_format != plane->format) {
+	if (fb->pixel_format != base_plane->format_types[0]) {
 		DRM_ERROR("unsupported pixel format %08x %08x\n",
-			  fb->pixel_format, plane->format);
+			  fb->pixel_format, base_plane->format_types[0]);
 		return -EINVAL;
 	}
 
@@ -159,6 +149,11 @@ static int xylon_drm_plane_update(struct drm_plane *base_plane,
 {
 	int ret;
 
+	if (base_plane->type == DRM_PLANE_TYPE_PRIMARY) {
+		crtc->x = crtc_x;
+		crtc->y = crtc_y;
+	}
+
 	ret = xylon_drm_plane_fb_set(base_plane, fb,
 				     crtc_x, crtc_y, crtc_w, crtc_h,
 				     src_x >> 16, src_y >> 16,
@@ -187,7 +182,7 @@ static int xylon_drm_plane_disable(struct drm_plane *base_plane)
 	return 0;
 }
 
-void xylon_drm_plane_destroy(struct drm_plane *base_plane)
+static void xylon_drm_plane_destroy(struct drm_plane *base_plane)
 {
 	struct xylon_drm_plane *plane = to_xylon_plane(base_plane);
 	struct xylon_drm_plane_manager *manager = plane->manager;
@@ -207,19 +202,11 @@ static int xylon_drm_plane_set_property(struct drm_plane *base_plane,
 	struct xylon_drm_plane_op op;
 	unsigned int val = (unsigned int)value;
 
-	if (property == props->control) {
-		if (val)
-			xylon_drm_plane_dpms(base_plane, DRM_MODE_DPMS_ON);
-		else
-			xylon_drm_plane_dpms(base_plane, DRM_MODE_DPMS_OFF);
-	} else if (property == props->color_transparency) {
-		op.id = XYLON_DRM_PLANE_OP_ID_COLOR_TRANSPARENCY,
+	if (property == props->color_transparency) {
+		op.id = XYLON_DRM_PLANE_OP_ID_COLOR_TRANSPARENCY;
 		op.param = (bool)val;
 	} else if (property == props->interlace) {
 		op.id = XYLON_DRM_PLANE_OP_ID_INTERLACE;
-		op.param = (bool)val;
-	} else if (property == props->pixel_format) {
-		op.id = XYLON_DRM_PLANE_OP_ID_PIXEL_FORMAT;
 		op.param = (bool)val;
 	} else if (property == props->transparency) {
 		op.id = XYLON_DRM_PLANE_OP_ID_TRANSPARENCY;
@@ -236,7 +223,7 @@ static int xylon_drm_plane_set_property(struct drm_plane *base_plane,
 	return 0;
 }
 
-static struct drm_plane_funcs xylon_drm_plane_funcs = {
+static const struct drm_plane_funcs xylon_drm_plane_funcs = {
 	.update_plane = xylon_drm_plane_update,
 	.disable_plane = xylon_drm_plane_disable,
 	.destroy = xylon_drm_plane_destroy,
@@ -250,53 +237,46 @@ static int xylon_drm_plane_create_properties(struct drm_plane *base_plane)
 	struct xylon_drm_plane *plane = to_xylon_plane(base_plane);
 	struct xylon_drm_plane_properties *props = &plane->properties;
 	int size;
+	bool bg_layer = xylon_cvc_get_info(plane->manager->cvc,
+					   LOGICVC_INFO_BACKGROUND_LAYER,
+					   0);
 	bool last_plane = xylon_cvc_get_info(plane->manager->cvc,
 					     LOGICVC_INFO_LAST_LAYER,
 					     plane->id);
 
-	size = xylon_drm_property_size(property_control);
-	if (xylon_drm_property_create_list(dev, obj,
-					   &props->control,
-					   property_control,
-					   "control",
-					   size))
-		return -EINVAL;
-	size = xylon_drm_property_size(property_color_transparency);
-	if (xylon_drm_property_create_list(dev, obj,
-					   &props->color_transparency,
-					   property_color_transparency,
-					   "color_transparency",
-					   size))
-		return -EINVAL;
+	if (bg_layer || !last_plane) {
+		size = xylon_drm_property_size(property_color_transparency);
+		if (xylon_drm_property_create_list(dev, obj,
+						   &props->color_transparency,
+						   property_color_transparency,
+						   "color_transparency",
+						   size))
+			return -EINVAL;
+	}
+	if (bg_layer || !last_plane) {
+		if (xylon_drm_property_create_range(dev, obj,
+					    &props->transparency,
+					    "transparency",
+					    XYLON_DRM_PROPERTY_ALPHA_MIN,
+					    XYLON_DRM_PROPERTY_ALPHA_MAX,
+					    XYLON_DRM_PROPERTY_ALPHA_MAX))
+			return -EINVAL;
+	}
+	if (bg_layer || !last_plane) {
+		if (xylon_drm_property_create_range(dev, obj,
+					    &props->transparent_color,
+					    "transparent_color",
+					    XYLON_DRM_PROPERTY_COLOR_MIN,
+					    XYLON_DRM_PROPERTY_COLOR_MAX,
+					    XYLON_DRM_PROPERTY_COLOR_MIN))
+			return -EINVAL;
+	}
 	size = xylon_drm_property_size(property_interlace);
 	if (xylon_drm_property_create_list(dev, obj,
 					   &props->interlace,
 					   property_interlace,
 					   "interlace",
 					   size))
-		return -EINVAL;
-	size = xylon_drm_property_size(property_pixel_format);
-	if (xylon_drm_property_create_list(dev, obj,
-					   &props->pixel_format,
-					   property_pixel_format,
-					   "pixel_format",
-					   size))
-		return -EINVAL;
-	if (!last_plane &&
-	    xylon_drm_property_create_range(dev, obj,
-					    &props->transparency,
-					    "transparency",
-					    XYLON_DRM_PROPERTY_ALPHA_MIN,
-					    XYLON_DRM_PROPERTY_ALPHA_MAX,
-					    XYLON_DRM_PROPERTY_ALPHA_MAX))
-		return -EINVAL;
-	if (!last_plane &&
-	    xylon_drm_property_create_range(dev, obj,
-					    &props->transparent_color,
-					    "transparent_color",
-					    XYLON_DRM_PROPERTY_COLOR_MIN,
-					    XYLON_DRM_PROPERTY_COLOR_MAX,
-					    XYLON_DRM_PROPERTY_COLOR_MIN))
 		return -EINVAL;
 
 	return 0;
@@ -308,25 +288,36 @@ xylon_drm_plane_properties_initial_value(struct drm_plane *base_plane)
 	struct drm_mode_object *obj = &base_plane->base;
 	struct xylon_drm_plane *plane = to_xylon_plane(base_plane);
 	struct xylon_drm_plane_properties *props = &plane->properties;
+	struct xylon_drm_plane_op op;
 	bool val;
 
-	val = xylon_cvc_get_info(plane->manager->cvc,
-				 LOGICVC_INFO_LAYER_COLOR_TRANSPARENCY,
-				 plane->id);
-	drm_object_property_set_value(obj, props->color_transparency, val);
+	if (props->color_transparency) {
+		op.id = XYLON_DRM_PLANE_OP_ID_COLOR_TRANSPARENCY;
+		op.param = false;
+		xylon_drm_plane_op(base_plane, &op);
+
+		val = xylon_cvc_get_info(plane->manager->cvc,
+					 LOGICVC_INFO_LAYER_COLOR_TRANSPARENCY,
+					 plane->id);
+		drm_object_property_set_value(obj, props->color_transparency,
+					      val);
+	}
 }
 
-struct drm_plane *
+static struct drm_plane *
 xylon_drm_plane_create(struct xylon_drm_plane_manager *manager,
-		       unsigned int possible_crtcs, bool priv, int priv_id)
+		       unsigned int possible_crtcs, bool primary,
+		       unsigned int primary_id)
 {
 	struct device *dev = manager->dev->dev;
 	struct xylon_drm_plane *plane;
 	struct xylon_cvc *cvc = manager->cvc;
+	enum drm_plane_type type;
+	u32 format;
 	int i, ret;
 
-	if (priv) {
-		i = priv_id;
+	if (primary) {
+		i = primary_id;
 	} else {
 		for (i = 0; i < manager->planes; i++)
 			if (!manager->plane[i])
@@ -344,13 +335,17 @@ xylon_drm_plane_create(struct xylon_drm_plane_manager *manager,
 		return ERR_PTR(-ENOMEM);
 	}
 
-	plane->format = xylon_cvc_layer_get_format(cvc, i);
-	plane->bpp = xylon_cvc_layer_get_bits_per_pixel(cvc, i);
 	plane->id = i;
-	plane->priv = priv;
 
-	ret = drm_plane_init(manager->dev, &plane->base, possible_crtcs,
-			     &xylon_drm_plane_funcs, &plane->format, 1, priv);
+	format = xylon_cvc_layer_get_format(cvc, i);
+	if (primary)
+		type = DRM_PLANE_TYPE_PRIMARY;
+	else
+		type = DRM_PLANE_TYPE_OVERLAY;
+
+	ret = drm_universal_plane_init(manager->dev, &plane->base,
+				       possible_crtcs, &xylon_drm_plane_funcs,
+				       &format, 1, type, NULL);
 	if (ret) {
 		DRM_ERROR("failed initialize plane\n");
 		goto err_init;
@@ -370,31 +365,66 @@ err_init:
 	return ERR_PTR(ret);
 }
 
-void xylon_drm_plane_destroy_all(struct xylon_drm_plane_manager *manager)
+void xylon_drm_plane_properties_restore(struct xylon_drm_plane_manager *manager)
 {
+	struct drm_mode_object *obj;
+	struct drm_plane *base_plane;
 	struct xylon_drm_plane *plane;
+	struct xylon_drm_plane_properties *props;
+	struct xylon_drm_plane_op op;
 	int i;
 
 	for (i = 0; i < manager->planes; i++) {
+		if (!manager->plane[i])
+			continue;
+
 		plane = manager->plane[i];
-		if (plane && !plane->priv) {
-			xylon_drm_plane_destroy(&plane->base);
-			manager->plane[i] = NULL;
-		}
+		base_plane = &plane->base;
+		obj = &base_plane->base;
+		props = &plane->properties;
+
+		op.id = XYLON_DRM_PLANE_OP_ID_COLOR_TRANSPARENCY;
+		op.param = false;
+		xylon_drm_plane_op(base_plane, &op);
+		drm_object_property_set_value(obj, props->color_transparency,
+					      false);
+
+		op.id = XYLON_DRM_PLANE_OP_ID_INTERLACE;
+		xylon_drm_plane_op(base_plane, &op);
+		drm_object_property_set_value(obj, props->interlace, false);
+
+		op.id = XYLON_DRM_PLANE_OP_ID_TRANSPARENCY;
+		op.param = XYLON_DRM_PROPERTY_ALPHA_MAX;
+		xylon_drm_plane_op(base_plane, &op);
+		drm_object_property_set_value(obj, props->transparency,
+					      XYLON_DRM_PROPERTY_ALPHA_MAX);
+
+		op.id = XYLON_DRM_PLANE_OP_ID_TRANSPARENT_COLOR;
+		op.param = XYLON_DRM_PROPERTY_COLOR_MIN;
+		xylon_drm_plane_op(base_plane, &op);
+		drm_object_property_set_value(obj, props->transparent_color,
+					      XYLON_DRM_PROPERTY_COLOR_MIN);
 	}
 }
 
 int xylon_drm_plane_create_all(struct xylon_drm_plane_manager *manager,
-			       unsigned int possible_crtcs)
+			       unsigned int possible_crtcs,
+			       unsigned int primary_id)
 {
 	struct drm_plane *plane;
 	int i, ret;
+	bool primary;
 
 	for (i = 0; i < manager->planes; i++) {
 		if (manager->plane[i])
 			continue;
+
+		primary = false;
+		if (i == primary_id)
+			primary = true;
+
 		plane = xylon_drm_plane_create(manager, possible_crtcs,
-					       false, 0);
+					       primary, primary_id);
 		if (IS_ERR(plane)) {
 			DRM_ERROR("failed allocate plane\n");
 			ret = PTR_ERR(plane);
@@ -405,18 +435,29 @@ int xylon_drm_plane_create_all(struct xylon_drm_plane_manager *manager,
 	return 0;
 
 err_out:
-	xylon_drm_plane_destroy_all(manager);
 	return ret;
+}
+
+struct drm_plane *
+xylon_drm_plane_get_base(struct xylon_drm_plane_manager *manager,
+			 unsigned int id)
+{
+	return &manager->plane[id]->base;
 }
 
 bool xylon_drm_plane_check_format(struct xylon_drm_plane_manager *manager,
 				  u32 format)
 {
+	struct drm_plane *base_plane;
 	int i;
 
-	for (i = 0; i < manager->planes; i++)
-		if (manager->plane[i] && (manager->plane[i]->format == format))
-			return true;
+	for (i = 0; i < manager->planes; i++) {
+		if (manager->plane[i]) {
+			base_plane = &manager->plane[i]->base;
+			if (format == base_plane->format_types[0])
+				return true;
+		}
+	}
 
 	return false;
 }
@@ -424,8 +465,9 @@ bool xylon_drm_plane_check_format(struct xylon_drm_plane_manager *manager,
 unsigned int xylon_drm_plane_get_bits_per_pixel(struct drm_plane *base_plane)
 {
 	struct xylon_drm_plane *plane = to_xylon_plane(base_plane);
+	struct xylon_drm_plane_manager *manager = plane->manager;
 
-	return plane->bpp;
+	return xylon_cvc_layer_get_bits_per_pixel(manager->cvc, plane->id);
 }
 
 int xylon_drm_plane_op(struct drm_plane *base_plane,
@@ -461,12 +503,6 @@ int xylon_drm_plane_op(struct drm_plane *base_plane,
 		else
 			par = LOGICVC_LAYER_INTERLACE_DISABLE;
 		break;
-	case XYLON_DRM_PLANE_OP_ID_PIXEL_FORMAT:
-		if (op->param)
-			par = LOGICVC_LAYER_PIXEL_FORMAT_ABGR_ENABLE;
-		else
-			par = LOGICVC_LAYER_PIXEL_FORMAT_ABGR_DISABLE;
-		break;
 	}
 
 	xylon_cvc_layer_ctrl(cvc, id, par);
@@ -501,18 +537,4 @@ xylon_drm_plane_probe_manager(struct drm_device *drm_dev,
 		  manager->planes == 1 ? "plane" : "planes");
 
 	return manager;
-}
-
-void xylon_drm_plane_remove_manager(struct xylon_drm_plane_manager *manager)
-{
-	int i;
-
-	for (i = 0; i < manager->planes; i++) {
-		if (manager->plane[i] && !manager->plane[i]->priv) {
-			xylon_drm_plane_destroy(&manager->plane[i]->base);
-			manager->plane[i] = NULL;
-		}
-	}
-
-	manager->plane = NULL;
 }

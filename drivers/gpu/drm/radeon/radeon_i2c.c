@@ -94,6 +94,8 @@ static int pre_xfer(struct i2c_adapter *i2c_adap)
 	struct radeon_i2c_bus_rec *rec = &i2c->rec;
 	uint32_t temp;
 
+	mutex_lock(&i2c->mutex);
+
 	/* RV410 appears to have a bug where the hw i2c in reset
 	 * holds the i2c port in a bad state - switch hw i2c away before
 	 * doing DDC - do this for all r200s/r300s/r400s for safety sake
@@ -170,6 +172,8 @@ static void post_xfer(struct i2c_adapter *i2c_adap)
 	temp = RREG32(rec->mask_data_reg) & ~rec->mask_data_mask;
 	WREG32(rec->mask_data_reg, temp);
 	temp = RREG32(rec->mask_data_reg);
+
+	mutex_unlock(&i2c->mutex);
 }
 
 static int get_clock(void *i2c_priv)
@@ -813,6 +817,8 @@ static int radeon_hw_i2c_xfer(struct i2c_adapter *i2c_adap,
 	struct radeon_i2c_bus_rec *rec = &i2c->rec;
 	int ret = 0;
 
+	mutex_lock(&i2c->mutex);
+
 	switch (rdev->family) {
 	case CHIP_R100:
 	case CHIP_RV100:
@@ -879,6 +885,8 @@ static int radeon_hw_i2c_xfer(struct i2c_adapter *i2c_adap,
 		break;
 	}
 
+	mutex_unlock(&i2c->mutex);
+
 	return ret;
 }
 
@@ -919,6 +927,7 @@ struct radeon_i2c_chan *radeon_i2c_create(struct drm_device *dev,
 	i2c->adapter.dev.parent = &dev->pdev->dev;
 	i2c->dev = dev;
 	i2c_set_adapdata(&i2c->adapter, i2c);
+	mutex_init(&i2c->mutex);
 	if (rec->mm_i2c ||
 	    (rec->hw_capable &&
 	     radeon_hw_i2c &&
@@ -929,10 +938,8 @@ struct radeon_i2c_chan *radeon_i2c_create(struct drm_device *dev,
 			 "Radeon i2c hw bus %s", name);
 		i2c->adapter.algo = &radeon_i2c_algo;
 		ret = i2c_add_adapter(&i2c->adapter);
-		if (ret) {
-			DRM_ERROR("Failed to register hw i2c %s\n", name);
+		if (ret)
 			goto out_free;
-		}
 	} else if (rec->hw_capable &&
 		   radeon_hw_i2c &&
 		   ASIC_IS_DCE3(rdev)) {
@@ -941,10 +948,8 @@ struct radeon_i2c_chan *radeon_i2c_create(struct drm_device *dev,
 			 "Radeon i2c hw bus %s", name);
 		i2c->adapter.algo = &radeon_atom_i2c_algo;
 		ret = i2c_add_adapter(&i2c->adapter);
-		if (ret) {
-			DRM_ERROR("Failed to register hw i2c %s\n", name);
+		if (ret)
 			goto out_free;
-		}
 	} else {
 		/* set the radeon bit adapter */
 		snprintf(i2c->adapter.name, sizeof(i2c->adapter.name),
@@ -977,9 +982,8 @@ void radeon_i2c_destroy(struct radeon_i2c_chan *i2c)
 {
 	if (!i2c)
 		return;
+	WARN_ON(i2c->has_aux);
 	i2c_del_adapter(&i2c->adapter);
-	if (i2c->has_aux)
-		drm_dp_aux_unregister_i2c_bus(&i2c->aux);
 	kfree(i2c);
 }
 
@@ -1036,11 +1040,6 @@ struct radeon_i2c_chan *radeon_i2c_lookup(struct radeon_device *rdev,
 			return rdev->i2c_bus[i];
 		}
 	}
-	return NULL;
-}
-
-struct drm_encoder *radeon_best_encoder(struct drm_connector *connector)
-{
 	return NULL;
 }
 

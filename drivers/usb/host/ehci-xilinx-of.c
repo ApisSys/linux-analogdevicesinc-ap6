@@ -31,6 +31,7 @@
 #include <linux/of.h>
 #include <linux/of_platform.h>
 #include <linux/of_address.h>
+#include <linux/of_irq.h>
 
 /**
  * ehci_xilinx_port_handed_over - hand the port out if failed to enable it
@@ -45,6 +46,8 @@
  * There are cases when the host controller fails to enable the port due to,
  * for example, insufficient power that can be supplied to the device from
  * the USB bus. In those cases, the messages printed here are not helpful.
+ *
+ * Return: Always return 0
  */
 static int ehci_xilinx_port_handed_over(struct usb_hcd *hcd, int portnum)
 {
@@ -59,11 +62,9 @@ static int ehci_xilinx_port_handed_over(struct usb_hcd *hcd, int portnum)
 		dev_warn(hcd->self.controller,
 			"Maybe your device is not a high speed device?\n");
 		dev_warn(hcd->self.controller,
-			"The USB host controller does not support full speed "
-			"nor low speed devices\n");
+			"USB host controller doesn't support FS/LS devices\n");
 		dev_warn(hcd->self.controller,
-			"You can reconfigure the host controller to have "
-			"full speed support\n");
+			"You can reconfigure host controller to support FS\n");
 	}
 
 	return 0;
@@ -125,6 +126,8 @@ static const struct hc_driver ehci_xilinx_of_hc_driver = {
  * host controller. Because the Xilinx USB host controller can be configured
  * as HS only or HS/FS only, it checks the configuration in the device tree
  * entry, and sets an appropriate value for hcd->has_tt.
+ *
+ * Return: zero on success, 'rv' value on failure
  */
 static int ehci_hcd_xilinx_of_probe(struct platform_device *op)
 {
@@ -209,6 +212,8 @@ err_irq:
  *
  * Remove the hcd structure, and release resources that has been requested
  * during probe.
+ *
+ * Return: Always return 0
  */
 static int ehci_hcd_xilinx_of_remove(struct platform_device *op)
 {
@@ -235,7 +240,6 @@ static struct platform_driver ehci_hcd_xilinx_of_driver = {
 	.shutdown	= usb_hcd_platform_shutdown,
 	.driver = {
 		.name = "xilinx-of-ehci",
-		.owner = THIS_MODULE,
 		.of_match_table = ehci_hcd_xilinx_of_match,
 	},
 };

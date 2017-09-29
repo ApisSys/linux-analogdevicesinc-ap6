@@ -10,6 +10,7 @@
 #define ADI_AXI_DDS_H_
 
 #include <linux/spi/spi.h>
+#include <linux/clk/clkscale.h>
 
 #define ADI_REG_VERSION		0x0000				/*Version and Scratch Registers */
 #define ADI_VERSION(x)		(((x) & 0xffffffff) << 0)	/* RO, Version number. */
@@ -83,6 +84,7 @@ enum dds_data_select {
 #define ADI_TO_DRP_WDATA(x)	(((x) >> 0) & 0xFFFF)
 
 #define ADI_REG_DRP_STATUS	0x0074
+#define ADI_DRP_LOCKED		(1 << 17)
 #define ADI_DRP_STATUS		(1 << 16)
 #define ADI_DRP_RDATA(x)		(((x) & 0xFFFF) << 0)
 #define ADI_TO_DRP_RDATA(x)	(((x) >> 0) & 0xFFFF)
@@ -98,6 +100,8 @@ enum dds_data_select {
 #define ADI_REG_USR_CNTRL_1	0x00A0
 #define ADI_USR_CHANMAX(x)	(((x) & 0xFF) << 0)
 #define ADI_TO_USR_CHANMAX(x)	(((x) >> 0) & 0xFF)
+
+#define ADI_REG_DAC_GP_CONTROL	0x00BC
 
 #define ADI_REG_DAC_DP_DISABLE	0x00C0
 #define ADI_DAC_DP_DISABLE	(1 << 0)
@@ -181,6 +185,8 @@ enum {
 	ID_AD9122,
 	ID_AD9739A,
 	ID_AD9144,
+	ID_AD9152,
+	ID_AD9162,
 };
 
 struct cf_axi_dds_chip_info {
@@ -198,21 +204,23 @@ struct cf_axi_dds_state {
 	struct device 		*dev_spi;
 	struct clk 		*clk;
 	struct cf_axi_dds_chip_info	*chip_info;
+	struct gpio_desc		*plddrbypass_gpio;
 
-	bool			has_fifo_interface;
 	bool			standalone;
 	bool			dp_disable;
 	bool			enable;
+	bool			pl_dma_fifo_en;
 
 	struct iio_info		iio_info;
 	void __iomem		*regs;
 	void __iomem		*slave_regs;
 	void __iomem		*master_regs;
-	u32			dac_clk;
+	u64			dac_clk;
 	unsigned 		ddr_dds_interp_en;
-	unsigned			cached_freq[8];
-	unsigned			version;
-	unsigned			have_slave_channels;
+	unsigned		cached_freq[8];
+	unsigned		version;
+	unsigned		have_slave_channels;
+	unsigned		interpolation_factor;
 	struct notifier_block   clk_nb;
 };
 
@@ -226,6 +234,8 @@ enum {
 struct cf_axi_converter {
 	struct spi_device 	*spi;
 	struct clk 	*clk[CLK_NUM];
+	struct clock_scale	clkscale[CLK_NUM];
+	void		*phy;
 	struct gpio_desc			*pwrdown_gpio;
 	struct gpio_desc			*reset_gpio;
 	struct gpio_desc			*txen_gpio;
@@ -241,7 +251,7 @@ struct cf_axi_converter {
 				 unsigned reg, unsigned val);
 	int		(*setup)(struct cf_axi_converter *conv);
 	int		(*get_fifo_status)(struct cf_axi_converter *conv);
-	unsigned long	(*get_data_clk)(struct cf_axi_converter *conv);
+	unsigned long long	(*get_data_clk)(struct cf_axi_converter *conv);
 
 	int (*read_raw)(struct iio_dev *indio_dev,
 			struct iio_chan_spec const *chan,

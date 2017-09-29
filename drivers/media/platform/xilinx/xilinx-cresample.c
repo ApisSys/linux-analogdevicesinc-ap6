@@ -1,9 +1,11 @@
 /*
  * Xilinx Chroma Resampler
  *
- * Copyright (C) 2013 - 2014 Xilinx, Inc.
+ * Copyright (C) 2013-2015 Ideas on Board
+ * Copyright (C) 2013-2015 Xilinx, Inc.
  *
- * Author: Hyun Woo Kwon <hyunk@xilinx.com>
+ * Contacts: Hyun Kwon <hyun.kwon@xilinx.com>
+ *           Laurent Pinchart <laurent.pinchart@ideasonboard.com>
  *
  * This software is licensed under the terms of the GNU General Public
  * License version 2, as published by the Free Software Foundation, and
@@ -84,12 +86,13 @@ static int xcresample_s_stream(struct v4l2_subdev *subdev, int enable)
 
 static struct v4l2_mbus_framefmt *
 __xcresample_get_pad_format(struct xcresample_device *xcresample,
-			    struct v4l2_subdev_fh *fh,
+			    struct v4l2_subdev_pad_config *cfg,
 			    unsigned int pad, u32 which)
 {
 	switch (which) {
 	case V4L2_SUBDEV_FORMAT_TRY:
-		return v4l2_subdev_get_try_format(fh, pad);
+		return v4l2_subdev_get_try_format(&xcresample->xvip.subdev, cfg,
+						  pad);
 	case V4L2_SUBDEV_FORMAT_ACTIVE:
 		return &xcresample->formats[pad];
 	default:
@@ -98,41 +101,41 @@ __xcresample_get_pad_format(struct xcresample_device *xcresample,
 }
 
 static int xcresample_get_format(struct v4l2_subdev *subdev,
-				 struct v4l2_subdev_fh *fh,
+				 struct v4l2_subdev_pad_config *cfg,
 				 struct v4l2_subdev_format *fmt)
 {
 	struct xcresample_device *xcresample = to_cresample(subdev);
 
-	fmt->format = *__xcresample_get_pad_format(xcresample, fh, fmt->pad,
+	fmt->format = *__xcresample_get_pad_format(xcresample, cfg, fmt->pad,
 						   fmt->which);
 
 	return 0;
 }
 
 static int xcresample_set_format(struct v4l2_subdev *subdev,
-				 struct v4l2_subdev_fh *fh,
+				 struct v4l2_subdev_pad_config *cfg,
 				 struct v4l2_subdev_format *fmt)
 {
 	struct xcresample_device *xcresample = to_cresample(subdev);
-	struct v4l2_mbus_framefmt *__format;
+	struct v4l2_mbus_framefmt *format;
 
-	__format = __xcresample_get_pad_format(xcresample, fh, fmt->pad,
-					       fmt->which);
+	format = __xcresample_get_pad_format(xcresample, cfg, fmt->pad,
+					     fmt->which);
 
 	if (fmt->pad == XVIP_PAD_SOURCE) {
-		fmt->format = *__format;
+		fmt->format = *format;
 		return 0;
 	}
 
-	xvip_set_format_size(__format, fmt);
+	xvip_set_format_size(format, fmt);
 
-	fmt->format = *__format;
+	fmt->format = *format;
 
 	/* Propagate the format to the source pad. */
-	__format = __xcresample_get_pad_format(xcresample, fh, XVIP_PAD_SOURCE,
-					       fmt->which);
+	format = __xcresample_get_pad_format(xcresample, cfg, XVIP_PAD_SOURCE,
+					     fmt->which);
 
-	xvip_set_format_size(__format, fmt);
+	xvip_set_format_size(format, fmt);
 
 	return 0;
 }
@@ -145,14 +148,14 @@ static int xcresample_open(struct v4l2_subdev *subdev,
 			   struct v4l2_subdev_fh *fh)
 {
 	struct xcresample_device *xcresample = to_cresample(subdev);
-	struct v4l2_mbus_framefmt *__format;
+	struct v4l2_mbus_framefmt *format;
 
 	/* Initialize with default formats */
-	__format = v4l2_subdev_get_try_format(fh, XVIP_PAD_SINK);
-	*__format = xcresample->default_formats[XVIP_PAD_SINK];
+	format = v4l2_subdev_get_try_format(subdev, fh->pad, XVIP_PAD_SINK);
+	*format = xcresample->default_formats[XVIP_PAD_SINK];
 
-	__format = v4l2_subdev_get_try_format(fh, XVIP_PAD_SOURCE);
-	*__format = xcresample->default_formats[XVIP_PAD_SOURCE];
+	format = v4l2_subdev_get_try_format(subdev, fh->pad, XVIP_PAD_SOURCE);
+	*format = xcresample->default_formats[XVIP_PAD_SOURCE];
 
 	return 0;
 }
@@ -316,7 +319,6 @@ static int xcresample_parse_of(struct xcresample_device *xcresample)
 static int xcresample_probe(struct platform_device *pdev)
 {
 	struct xcresample_device *xcresample;
-	struct resource *res;
 	struct v4l2_subdev *subdev;
 	struct v4l2_mbus_framefmt *default_format;
 	int ret;
@@ -331,10 +333,9 @@ static int xcresample_probe(struct platform_device *pdev)
 	if (ret < 0)
 		return ret;
 
-	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-	xcresample->xvip.iomem = devm_ioremap_resource(&pdev->dev, res);
-	if (IS_ERR(xcresample->xvip.iomem))
-		return PTR_ERR(xcresample->xvip.iomem);
+	ret = xvip_init_resources(&xcresample->xvip);
+	if (ret < 0)
+		return ret;
 
 	/* Reset and initialize the core */
 	xvip_reset(&xcresample->xvip);
@@ -366,9 +367,9 @@ static int xcresample_probe(struct platform_device *pdev)
 	xcresample->pads[XVIP_PAD_SINK].flags = MEDIA_PAD_FL_SINK;
 	xcresample->pads[XVIP_PAD_SOURCE].flags = MEDIA_PAD_FL_SOURCE;
 	subdev->entity.ops = &xcresample_media_ops;
-	ret = media_entity_init(&subdev->entity, 2, xcresample->pads, 0);
+	ret = media_entity_pads_init(&subdev->entity, 2, xcresample->pads);
 	if (ret < 0)
-		return ret;
+		goto error;
 
 	v4l2_ctrl_handler_init(&xcresample->ctrl_handler, 2);
 	xcresample_field.def =
@@ -403,6 +404,7 @@ static int xcresample_probe(struct platform_device *pdev)
 error:
 	v4l2_ctrl_handler_free(&xcresample->ctrl_handler);
 	media_entity_cleanup(&subdev->entity);
+	xvip_cleanup_resources(&xcresample->xvip);
 	return ret;
 }
 
@@ -415,6 +417,8 @@ static int xcresample_remove(struct platform_device *pdev)
 	v4l2_ctrl_handler_free(&xcresample->ctrl_handler);
 	media_entity_cleanup(&subdev->entity);
 
+	xvip_cleanup_resources(&xcresample->xvip);
+
 	return 0;
 }
 
@@ -422,7 +426,7 @@ static SIMPLE_DEV_PM_OPS(xcresample_pm_ops, xcresample_pm_suspend,
 			 xcresample_pm_resume);
 
 static const struct of_device_id xcresample_of_id_table[] = {
-	{ .compatible = "xlnx,axi-cresample-4.0" },
+	{ .compatible = "xlnx,v-cresample-4.0" },
 	{ }
 };
 MODULE_DEVICE_TABLE(of, xcresample_of_id_table);

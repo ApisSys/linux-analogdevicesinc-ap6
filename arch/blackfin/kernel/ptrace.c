@@ -117,6 +117,7 @@ put_reg(struct task_struct *task, unsigned long regno, unsigned long data)
 int
 is_user_addr_valid(struct task_struct *child, unsigned long start, unsigned long len)
 {
+	bool valid;
 	struct vm_area_struct *vma;
 	struct sram_list_struct *sraml;
 
@@ -124,9 +125,12 @@ is_user_addr_valid(struct task_struct *child, unsigned long start, unsigned long
 	if (start + len < start)
 		return -EIO;
 
+	down_read(&child->mm->mmap_sem);
 	vma = find_vma(child->mm, start);
-	if (vma && start >= vma->vm_start && start + len <= vma->vm_end)
-			return 0;
+	valid = vma && start >= vma->vm_start && start + len <= vma->vm_end;
+	up_read(&child->mm->mmap_sem);
+	if (valid)
+		return 0;
 
 	for (sraml = child->mm->context.sram_list; sraml; sraml = sraml->next)
 		if (start >= (unsigned long)sraml->addr
@@ -267,7 +271,7 @@ long arch_ptrace(struct task_struct *child, long request,
 			case BFIN_MEM_ACCESS_CORE:
 			case BFIN_MEM_ACCESS_CORE_ONLY:
 				copied = access_process_vm(child, addr, &tmp,
-				                           to_copy, 0);
+							   to_copy, FOLL_FORCE);
 				if (copied)
 					break;
 
@@ -320,7 +324,8 @@ long arch_ptrace(struct task_struct *child, long request,
 			case BFIN_MEM_ACCESS_CORE:
 			case BFIN_MEM_ACCESS_CORE_ONLY:
 				copied = access_process_vm(child, addr, &data,
-				                           to_copy, 1);
+				                           to_copy,
+							   FOLL_FORCE | FOLL_WRITE);
 				break;
 			case BFIN_MEM_ACCESS_DMA:
 				if (safe_dma_memcpy(paddr, &data, to_copy))

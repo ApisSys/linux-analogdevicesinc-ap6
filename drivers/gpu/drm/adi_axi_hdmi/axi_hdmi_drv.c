@@ -14,16 +14,16 @@
 #include <linux/i2c.h>
 #include <linux/of_address.h>
 #include <linux/of_dma.h>
+#include <linux/of_graph.h>
 #include <linux/clk.h>
 
 #include <drm/drmP.h>
 #include <drm/drm.h>
 #include <drm/drm_crtc_helper.h>
 #include <drm/drm_gem_cma_helper.h>
+#include <drm/drm_atomic_helper.h>
 
 #include "axi_hdmi_drv.h"
-#include "axi_hdmi_crtc.h"
-#include "axi_hdmi_encoder.h"
 
 #define DRIVER_NAME	"axi_hdmi_drm"
 #define DRIVER_DESC	"AXI HDMI DRM"
@@ -40,10 +40,14 @@ static void axi_hdmi_output_poll_changed(struct drm_device *dev)
 static struct drm_mode_config_funcs axi_hdmi_mode_config_funcs = {
 	.fb_create = drm_fb_cma_create,
 	.output_poll_changed = axi_hdmi_output_poll_changed,
+	.atomic_check = drm_atomic_helper_check,
+	.atomic_commit = drm_atomic_helper_commit,
 };
 
 static void axi_hdmi_mode_config_init(struct drm_device *dev)
 {
+	drm_mode_config_init(dev);
+
 	dev->mode_config.min_width = 0;
 	dev->mode_config.min_height = 0;
 
@@ -63,11 +67,6 @@ static int axi_hdmi_load(struct drm_device *dev, unsigned long flags)
 
 	dev->dev_private = private;
 
-	drm_mode_config_init(dev);
-
-	/* init kms poll for handling hpd */
-	drm_kms_helper_poll_init(dev);
-
 	axi_hdmi_mode_config_init(dev);
 
 	private->crtc = axi_hdmi_crtc_create(dev);
@@ -82,12 +81,17 @@ static int axi_hdmi_load(struct drm_device *dev, unsigned long flags)
 	    goto err_crtc;
 	}
 
+	drm_mode_config_reset(dev);
+
 	private->fbdev = drm_fbdev_cma_init(dev, 32, 1, 1);
 	if (IS_ERR(private->fbdev)) {
 		DRM_ERROR("failed to initialize drm fbdev\n");
 		ret = PTR_ERR(private->fbdev);
 		goto err_crtc;
 	}
+
+	/* init kms poll for handling hpd */
+	drm_kms_helper_poll_init(dev);
 
 	return 0;
 
@@ -124,8 +128,7 @@ static const struct file_operations axi_hdmi_driver_fops = {
 };
 
 static struct drm_driver axi_hdmi_driver = {
-	.driver_features	= DRIVER_BUS_PLATFORM |
-				  DRIVER_MODESET | DRIVER_GEM,
+	.driver_features	= DRIVER_MODESET | DRIVER_GEM | DRIVER_ATOMIC,
 	.load			= axi_hdmi_load,
 	.unload			= axi_hdmi_unload,
 	.lastclose		= axi_hdmi_lastclose,
@@ -145,10 +148,6 @@ static struct drm_driver axi_hdmi_driver = {
 static const struct of_device_id adv7511_encoder_of_match[] = {
 	{
 		.compatible = "adi,axi-hdmi-tx-1.00.a",
-		.data = (const void *)AXI_HDMI
-	}, {
-		.compatible = "adi,axi-hdmi-1.00.a",
-		.data = (const void *)AXI_HDMI_LEGACY
 	},
 	{},
 };
@@ -159,50 +158,58 @@ static int axi_hdmi_platform_probe(struct platform_device *pdev)
 	const struct of_device_id *id;
 	struct device_node *np = pdev->dev.of_node;
 	struct axi_hdmi_private *private;
-	struct device_node *slave_node;
+	struct device_node *slave_node, *ep_node;
+	struct of_endpoint ep;
 	struct resource *res;
+	int ret;
 
 	private = devm_kzalloc(&pdev->dev, sizeof(*private), GFP_KERNEL);
 	if (!private)
 		return -ENOMEM;
 
 	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-	private->base = devm_request_and_ioremap(&pdev->dev, res);
-	if (!private->base)
-		return -EBUSY;
+	private->base = devm_ioremap_resource(&pdev->dev, res);
+	if (IS_ERR(private->base))
+		return PTR_ERR(private->base);
 
 	private->hdmi_clock = devm_clk_get(&pdev->dev, NULL);
 	if (IS_ERR(private->hdmi_clock)) {
-		printk("%s:%s[%d]\n", __FILE__, __func__, __LINE__);
 		return -EPROBE_DEFER;
 	}
 
-	slave_node = of_parse_phandle(np, "encoder-slave", 0);
+	ep_node = of_graph_get_next_endpoint(np, NULL);
+	if (ep_node) {
+		ret = of_graph_parse_endpoint(ep_node, &ep);
+		if (ret) {
+			of_node_put(ep_node);
+			return ret;
+		}
+		if (ep.port != 0 && ep.id != 0) {
+			of_node_put(ep_node);
+			return -EINVAL;
+		}
+		slave_node = of_graph_get_remote_port_parent(ep_node);
+		of_node_put(ep_node);
+	} else {
+		slave_node = of_parse_phandle(np, "encoder-slave", 0);
+	}
+
 	if (!slave_node)
 		return -EINVAL;
 
 	private->is_rgb = of_property_read_bool(np, "adi,is-rgb");
 
 	id = of_match_node(adv7511_encoder_of_match, np);
-	private->version = (unsigned long)id->data;
 
-	if (private->version == AXI_HDMI_LEGACY &&
-		of_property_read_bool(np, "adi,embedded-sync"))
-		private->version = AXI_HDMI_LEGACY_ES;
-	
 	private->encoder_slave = of_find_i2c_device_by_node(slave_node);
 	of_node_put(slave_node);
 
-	if (!private->encoder_slave || !private->encoder_slave->dev.driver) {
-		printk("%s:%s[%d]\n", __FILE__, __func__, __LINE__);
+	if (!private->encoder_slave || !private->encoder_slave->dev.driver)
 		return -EPROBE_DEFER;
-	}
 
 	private->dma = dma_request_slave_channel(&pdev->dev, "video");
-	if (private->dma == NULL) {
-		printk("%s:%s[%d]\n", __FILE__, __func__, __LINE__);
+	if (private->dma == NULL)
 		return -EPROBE_DEFER;
-	}
 
 	platform_set_drvdata(pdev, private);
 
